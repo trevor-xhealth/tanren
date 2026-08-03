@@ -28,10 +28,31 @@ import type { RunnerHandle } from "./allocator.js";
 // SOLE hang detector. There is NO wall-clock kill of the running command: the only
 // time bound in this contract is `connectTimeoutMs`, the legitimate TCP/SSH
 // HANDSHAKE bound (a dead handshake has no work to lose).
+// How much of a command's captured output the substrate RETAINS IN MEMORY. This is a
+// memory-residency policy, NOT a safety budget — nothing here bounds, kills, or gives up
+// on the running command (it still runs UNBOUNDED under the `watchdog`).
+//
+//   - `"full"`   (DEFAULT) — every byte, exactly as before. Required by the ~19 consumers
+//                that reconstruct a whole file read back over SSH, parse the whole stream,
+//                or COUNT regex matches across all of it. Several of those hard-throw on a
+//                short/malformed stream, so completeness is load-bearing and must never be
+//                taken away implicitly.
+//   - `"bounded"` — retain a head + tail only (see engine/ssh/boundedOutput.ts). An
+//                OPT-IN a call site may declare only when it can show the whole stream is
+//                not load-bearing — e.g. a gate step whose sole output consumer is a
+//                4 000-char `tailOf(...)`. The elision is reported OUT OF BAND on the
+//                result; the retained body carries only real bytes, cut on line
+//                boundaries, with no synthetic marker a parser could choke on.
+export type OutputRetention = "full" | "bounded";
+
 export interface RunnerCommand {
   command: string;
   cwd?: string;
   stdin?: string;
+  // Memory-residency policy for this command's captured output. Defaults to `"full"`.
+  // See {@link OutputRetention} — declaring `"bounded"` is a per-call-site assertion that
+  // no consumer of THIS command's result needs the complete stream.
+  outputRetention?: OutputRetention;
   // The legitimate connect-ESTABLISHMENT bound: how long to wait for the SSH
   // transport to come up (TCP connect + handshake/auth) before giving up on a
   // connection that never established. This is NOT a kill budget on the running
@@ -58,11 +79,34 @@ export interface RunnerCommand {
 //   - a FIXED signature across successive checks (no new output AND no workspace advance)
 //     = a wedged process — busy-but-not-advancing (an infinite loop spewing identical
 //     lines, a CPU-burn) OR dead/zombied — and SURFACES a recoverable stall.
-// It returns `undefined` when the runner is UNREACHABLE (the side-channel itself could
-// not run / the workspace is gone): no signal at all, which the substrate treats as an
-// absence of life. This is the PRIMARY progress mechanism for silent ops — it reads an
-// actual work signal, never a clock.
-export type LivenessProbe = () => Promise<string | undefined>;
+// This is the PRIMARY progress mechanism for silent ops — it reads an actual work signal,
+// never a clock.
+//
+// OBSERVED vs UNOBSERVABLE (F-10). The probe used to return `string | undefined`, where
+// `undefined` meant BOTH "the workspace is genuinely unchanged" and "I could not see the
+// workspace" — and the substrate folded both into the same fixed sentinel. A probe that
+// was merely SLOW or FAILED therefore counted as evidence of NON-PROGRESS, so two
+// consecutive slow reads aborted a perfectly healthy step. That is infrastructure
+// slowness masquerading as a stalled agent, and it is why the return type is now a
+// DISCRIMINATED observation: `observed: true` carries real evidence about the workspace
+// and feeds the progress fixed-point read; `observed: false` carries NO evidence and
+// feeds it nothing (it is tracked separately — see MIN_UNOBSERVABLE_PROBE_REPEATS in
+// ssh/watchdogProgress.ts — so a permanently blind probe still escalates, under its own
+// distinguishable kind).
+export type ProbeUnobservableReason =
+  // The probe's own side-channel command could not reach the runner at all.
+  | "unreachable"
+  // It reached the runner but the read itself failed (nonzero exit, a slow walk that was
+  // cut off, the workspace gone).
+  | "probe_failed"
+  // It returned something, but not a well-formed workspace signature.
+  | "unparseable";
+
+export type ProbeObservation =
+  | { observed: true; signature: string }
+  | { observed: false; reason: ProbeUnobservableReason };
+
+export type LivenessProbe = () => Promise<ProbeObservation>;
 
 // How the watchdog reacts when it observes a GENUINE absence of all signs of life
 // (no output, the probe reports no liveness): SURFACE a recoverable `stalled` result
@@ -153,14 +197,37 @@ export interface WatchdogProgressSignal {
 // caller re-drives). It is NEVER a time-based kill of working work. `quietForMs` is
 // evidence — how long since the last observed sign of life when the watchdog fired
 // (diagnostic only; NOT the trigger, which is the probe verdict).
+// Why a `stalled` result was surfaced. See `CommandResult.stallKind`.
+export type StallKind = "no_progress" | "probe_unobservable";
+
 export interface CommandResult {
   exitCode: number | null;
   stdout: string;
   stderr: string;
   signal?: string;
   stalled?: boolean;
+  // WHY the watchdog surfaced (F-10). Present only when `stalled` is true.
+  //   - `"no_progress"`        — the work signature was OBSERVED at a fixed point: no new
+  //                              distinct output AND a workspace the probe could see and
+  //                              reported unchanged. A genuine wedge (dead, zombied,
+  //                              deadlocked, or busy-but-not-advancing).
+  //   - `"probe_unobservable"` — we could not SEE the runner for a long consecutive run of
+  //                              probe ticks. Says nothing about whether the step is
+  //                              progressing; it is an INFRASTRUCTURE observation. Kept
+  //                              distinct precisely so a slow or failing probe can never be
+  //                              re-told as "the agent stalled".
+  stallKind?: StallKind;
   quietForMs?: number;
   failure?: Failure;
+  // OUT-OF-BAND elision accounting (F-9). Present and > 0 only when the command declared
+  // `outputRetention: "bounded"` AND the stream exceeded the retained head + tail. The
+  // count is deliberately NOT a marker inside the body: an injected `[… elided …]` line
+  // would be parsed as a JSONL event, a `git log` record, or a NUL-framed path by real
+  // consumers, and would be counted by a `matchAll` evidence check. A consumer that needs
+  // to know its view is partial reads THIS, and `stdout.length + stdoutElidedChars` is the
+  // exact number of chars the command emitted.
+  stdoutElidedChars?: number;
+  stderrElidedChars?: number;
 }
 
 // THE seam. `run()` executes one command in the runner the handle addresses.

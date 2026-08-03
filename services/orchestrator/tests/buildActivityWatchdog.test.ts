@@ -10,11 +10,13 @@ import {
 // The shared `buildActivityWatchdog` factory is the SOLE constructor of the per-call
 // ActivityWatchdog (feedback_no_timeouts_progress_based): every class is UNBOUNDED in
 // time and continues while it makes genuine PROGRESS. The agent/vcs classes attach a
-// workspace STRUCTURAL liveness probe that returns the workspace SIGNATURE (the total file
-// count + total byte size — NOT a single newest mtime, which a heartbeat-touched lock file
-// would advance forever; the apex-v45 wedge); the substrate compares the SEQUENCE for
-// advancement (a changing signature = a build/install growing the tree = progress). The infra
-// class is output-driven only. None is a wall-clock kill.
+// workspace STRUCTURAL liveness probe that returns the workspace SIGNATURE - what the work
+// has CONSUMED (free blocks + free inodes, one O(1) statfs) folded with a depth-bounded
+// digest of the workspace's top levels. NOT a single newest mtime, which a heartbeat-touched
+// lock file would advance forever (the apex-v45 wedge), and NOT a full-tree walk, which cost
+// 570 ms on a 370k-inode checkout and false-stalled healthy steps (F-10). The substrate
+// compares the SEQUENCE for advancement (a changing signature = a build/install consuming
+// disk = progress). The infra class is output-driven only. None is a wall-clock kill.
 
 const target: RunnerHandle = {
   backend: "ssh",
@@ -41,12 +43,17 @@ function scriptedSubstrate(results: CommandResult[]): { substrate: CommandSubstr
   return { substrate, commands };
 }
 
-// The probe runs `find … | awk` and reads back "<count> <bytes>" — the STRUCTURAL workspace
-// signature (file count + total byte size). A single heartbeat-touched lock file cannot grow
-// either, so this is IMMUNE to the apex-v45 lock-mtime wedge (the bare newest-mtime it replaced
-// would have ticked forever). This helper scripts that two-number stdout.
-function probeRead(count: number, bytes: number): CommandResult {
-  return { exitCode: 0, stdout: `${count} ${bytes}\n`, stderr: "" };
+// The runner's answer to the probe: `stat -f` free blocks + free inodes (an O(1) statfs),
+// then the depth-bounded tree digest folded by `cksum` (crc + byte count). Neither half moves
+// when a lock file is merely re-touched, so this is IMMUNE to the apex-v45 lock-mtime wedge
+// (the bare newest-mtime it replaced would have ticked forever) - and neither half costs a
+// full-tree walk (F-10). This helper scripts that four-integer stdout.
+function probeRead(freeBlocks: number, freeInodes: number, crc = 111, cksumBytes = 222): CommandResult {
+  return { exitCode: 0, stdout: `${freeBlocks} ${freeInodes}\n${crc} ${cksumBytes}\n`, stderr: "" };
+}
+
+function signatureOf(freeBlocks: number, freeInodes: number, crc = 111, cksumBytes = 222): string {
+  return `ws:${freeBlocks}:${freeInodes}:${crc}:${cksumBytes}`;
 }
 
 describe("buildActivityWatchdog (the shared per-call-class factory)", () => {
@@ -73,36 +80,37 @@ describe("buildActivityWatchdog (the shared per-call-class factory)", () => {
     expect(buildActivityWatchdog({ substrate, target, cls: "vcs" }).livenessProbe).toBeUndefined();
   });
 
-  it("liveness probe returns a CHANGING workspace signature as the tree GROWS (a build/install writing files)", async () => {
+  it("liveness probe returns a CHANGING workspace signature as the work CONSUMES disk (a build/install)", async () => {
     // Each read reports MORE files / MORE bytes → the probe returns a DISTINCT signature each
     // tick. The substrate reads a changing signature as genuine progress (a workspace being
     // written — a package unpacking, a download landing).
-    const { substrate } = scriptedSubstrate([probeRead(100, 5000), probeRead(140, 9000), probeRead(180, 13000)]);
+    const { substrate } = scriptedSubstrate([probeRead(9_000, 500), probeRead(8_600, 460), probeRead(8_100, 420)]);
     const wd = buildActivityWatchdog({ substrate, target, cls: "vcs", workspace: "/ws" });
     const probe = wd.livenessProbe!;
     const a = await probe();
     const b = await probe();
     const c = await probe();
-    expect(a).toBe("ws:100:5000");
-    expect(b).toBe("ws:140:9000");
-    expect(c).toBe("ws:180:13000");
+    expect(a).toEqual({ observed: true, signature: signatureOf(9_000, 500) });
+    expect(b).toEqual({ observed: true, signature: signatureOf(8_600, 460) });
+    expect(c).toEqual({ observed: true, signature: signatureOf(8_100, 420) });
     // Distinct signatures across ticks = advancement.
-    expect(new Set([a, b, c]).size).toBe(3);
+    expect(new Set([a, b, c].map((r) => JSON.stringify(r))).size).toBe(3);
   });
 
   it("liveness probe returns the SAME signature when the tree is FLAT (a deadlocked/zombied op)", async () => {
     // The SAME count+bytes each read — nothing new is being written → an UNCHANGING signature,
     // which the substrate's work-signature read eventually flags as a non-advancing fixed point.
     const { substrate } = scriptedSubstrate([
-      probeRead(2000, 9_000_000),
-      probeRead(2000, 9_000_000),
-      probeRead(2000, 9_000_000),
+      probeRead(9_000_000, 2000),
+      probeRead(9_000_000, 2000),
+      probeRead(9_000_000, 2000),
     ]);
     const wd = buildActivityWatchdog({ substrate, target, cls: "vcs", workspace: "/ws" });
     const probe = wd.livenessProbe!;
-    expect(await probe()).toBe("ws:2000:9000000");
-    expect(await probe()).toBe("ws:2000:9000000");
-    expect(await probe()).toBe("ws:2000:9000000");
+    const flat = { observed: true, signature: signatureOf(9_000_000, 2000) };
+    expect(await probe()).toEqual(flat);
+    expect(await probe()).toEqual(flat);
+    expect(await probe()).toEqual(flat);
   });
 
   it("apex-v45: a lock-file HEARTBEAT (constant tree, only an mtime ticking) reads as a FIXED POINT", async () => {
@@ -113,36 +121,54 @@ describe("buildActivityWatchdog (the shared per-call-class factory)", () => {
     // file count NOR the byte total, so successive reads of the SAME (count, bytes) — even as a
     // lock's mtime ticks underneath — yield the IDENTICAL signature → a fixed point the
     // substrate surfaces as a recoverable stall.
-    // 15591 files / 805552244 bytes — the live runner's constant tree during the wedge.
-    const wedged = probeRead(15591, 805552244);
+    // Nothing is consumed and nothing changes shape while a lock's mtime ticks, so all four
+    // components of the read hold flat.
+    const wedged = probeRead(102_127_416, 28_070_427, 810_286_853, 123_094);
     const { substrate } = scriptedSubstrate([wedged, wedged, wedged, wedged]);
     const wd = buildActivityWatchdog({ substrate, target, cls: "vcs", workspace: "/ws" });
     const probe = wd.livenessProbe!;
     const reads = [await probe(), await probe(), await probe(), await probe()];
-    // Every read is byte-identical — the lock-heartbeat is invisible to a structural signature.
-    expect(new Set(reads).size).toBe(1);
-    expect(reads[0]).toBe("ws:15591:805552244");
+    // Every read is byte-identical - the lock-heartbeat is invisible to a structural signature.
+    expect(new Set(reads.map((r) => JSON.stringify(r))).size).toBe(1);
+    expect(reads[0]).toEqual({
+      observed: true,
+      signature: signatureOf(102_127_416, 28_070_427, 810_286_853, 123_094),
+    });
   });
 
   it("liveness probe ADVANCES on a byte-only grow (an in-place file growing, count flat)", async () => {
     // A download landing into an existing file grows BYTES without adding a file — still genuine
     // progress. The signature folds bytes, so it advances even when the file count is flat.
-    const { substrate } = scriptedSubstrate([probeRead(15591, 805552244), probeRead(15591, 805552244 + 40_000_000)]);
+    // Free BLOCKS drop while the inode count and the depth-bounded digest are unchanged.
+    const { substrate } = scriptedSubstrate([
+      probeRead(102_132_299, 28_070_427, 810_286_853, 123_094),
+      probeRead(102_127_416, 28_070_427, 810_286_853, 123_094),
+    ]);
     const wd = buildActivityWatchdog({ substrate, target, cls: "vcs", workspace: "/ws" });
     const probe = wd.livenessProbe!;
     const a = await probe();
     const b = await probe();
-    expect(a).not.toBe(b);
+    expect(a).not.toEqual(b);
   });
 
-  it("liveness probe returns UNDEFINED when the probe itself cannot reach the runner (wedged side-channel)", async () => {
-    // A probe whose OWN little command failed (exit !=0 / stalled) is NOT a signal — it
-    // returns undefined so the substrate folds in a fixed sentinel (a non-advancing signature)
-    // and can surface a recoverable stall.
-    const failed: CommandResult = { exitCode: 1, stdout: "", stderr: "find: cannot access" };
+  it("reports UNOBSERVABLE (not a fixed point) when the probe itself cannot read the runner", async () => {
+    // A probe whose OWN little command failed (exit != 0 / stalled / garbled) is NOT a signal
+    // and NOT evidence of non-progress (F-10). It says so explicitly, so the substrate can keep
+    // it out of the progress fixed-point read instead of aborting a healthy step.
+    const failed: CommandResult = { exitCode: 1, stdout: "", stderr: "stat: cannot read" };
     const { substrate } = scriptedSubstrate([failed]);
     const wd = buildActivityWatchdog({ substrate, target, cls: "agent", workspace: "/ws" });
-    expect(await wd.livenessProbe!()).toBeUndefined();
+    expect(await wd.livenessProbe!()).toEqual({ observed: false, reason: "probe_failed" });
+
+    const unreachable: CommandResult = { exitCode: null, stdout: "", stderr: "", stalled: true };
+    const { substrate: s2 } = scriptedSubstrate([unreachable]);
+    const wd2 = buildActivityWatchdog({ substrate: s2, target, cls: "agent", workspace: "/ws" });
+    expect(await wd2.livenessProbe!()).toEqual({ observed: false, reason: "unreachable" });
+
+    const garbled: CommandResult = { exitCode: 0, stdout: "not a signature", stderr: "" };
+    const { substrate: s3 } = scriptedSubstrate([garbled]);
+    const wd3 = buildActivityWatchdog({ substrate: s3, target, cls: "agent", workspace: "/ws" });
+    expect(await wd3.livenessProbe!()).toEqual({ observed: false, reason: "unparseable" });
   });
 
   it("the probe's own side-channel command runs under a connect-ESTABLISHMENT bound (not a kill budget)", async () => {
