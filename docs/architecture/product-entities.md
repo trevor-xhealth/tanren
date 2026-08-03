@@ -43,6 +43,21 @@ stable opaque strings.
 | `spec_milestones`   | spec → milestone join                              | composite PK plus `UNIQUE (spec_id)` enforcing one-milestone-per-spec                                                   |
 | `spec_dependencies` | directed edges with no self-loop                   | composite PK, `from <> to` CHECK; cycle detection in application code                                                   |
 
+## Imported catalogs — `tanren.behavior.v0` / `tanren.persona.v0`
+
+A behavior catalog authored as Markdown (stable `B-####` ids, an initiative, an
+ordered persona list, provenance, authors, cross-references, `Intent` and
+`Observable outcomes`) is stored **whole** in four org-scoped tables rather than
+projected onto the BDD triple: `catalog_personas`, `catalog_behaviors`,
+`catalog_behavior_personas` and `catalog_behavior_relations`
+(`db/src/schemaCatalog.ts`).
+
+The `personas` / `behaviors` rows above remain the graph the rest of the engine
+reads; for an imported behavior they are a declared, **one-way** projection —
+observable outcomes become `then`, intent becomes `description`, and `given`/`when`
+stay empty because the source schema has no such concept. `catalog_behaviors` is
+the authority. Full reasoning: `docs/architecture/behavior-catalog-import.md`.
+
 ## Design Contract — the design-intent layer over the graph
 
 The **`DesignContract`** (`design_contracts` table, `db/src/schemaDesign.ts`;

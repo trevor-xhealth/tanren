@@ -3,6 +3,7 @@ import type pg from "pg";
 import { PgCasByteStore } from "../../engine/cas/pgCasByteStore.js";
 import type { ActorContextEnv } from "../../middleware/auth.js";
 import { createBehaviorRoutes } from "../behaviors/index.js";
+import { createCatalogRoutes } from "../catalog/index.js";
 import { createVerificationReadRoutes } from "../runtimeVerification/reads.js";
 import { createProofDashboardReadRoutes } from "../proofDashboard/reads.js";
 import { createBehaviorCoverageRoutes } from "./index.js";
@@ -28,6 +29,9 @@ import { createProofBundleRoutes } from "./proofBundle.js";
  */
 export function mountBehaviorSurfaces(app: Hono<ActorContextEnv>, scopedPool: pg.Pool): void {
   app.route("/orgs", createBehaviorRoutes({ pool: scopedPool }));
+  // The `tanren.behavior.v0` / `tanren.persona.v0` catalog import + read
+  // surface. Same behavior graph, same scoped pool, so it shares this mount.
+  app.route("/orgs", createCatalogRoutes({ pool: scopedPool }));
   app.route("/orgs", createBehaviorCoverageRoutes({ pool: scopedPool, cas: new PgCasByteStore(scopedPool) }));
   // rv-24 read-only exportable proof bundle for one acceptance run.
   app.route("/v1/orgs", createProofBundleRoutes({ pool: scopedPool }));
