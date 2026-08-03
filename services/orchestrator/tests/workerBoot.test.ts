@@ -30,7 +30,6 @@ describe("plane-split P1 — standalone worker boot", () => {
     "TANREN_SYSTEM_DATABASE_URL",
     "TANREN_SECRET_STORE",
     "TANREN_RUN_WORKER",
-    "TANREN_RUN_WORKER_CONCURRENCY",
     "TANREN_RUNNER_IDENTITY_KEY_PATH",
     // Saved/restored so the custom-ref / blank-ref cases can set it without leaking.
     "TANREN_RUNNER_IDENTITY_SECRET_REF",
@@ -81,7 +80,6 @@ describe("plane-split P1 — standalone worker boot", () => {
   });
 
   it("builds the runtime pool from DATABASE_URL and starts a worker loop that drains", async () => {
-    process.env["TANREN_RUN_WORKER_CONCURRENCY"] = "1";
     const booted = await bootRunWorker();
     try {
       // The loop is live (started, not yet draining) and bound to the
@@ -109,7 +107,6 @@ describe("plane-split P1 — standalone worker boot", () => {
   });
 
   it("starts a co-located reaper alongside the worker (both drain on stop)", async () => {
-    process.env["TANREN_RUN_WORKER_CONCURRENCY"] = "1";
     const booted = await bootRunWorker();
     try {
       // The boot wires BOTH the worker and the lease reaper — the data plane's
@@ -129,7 +126,6 @@ describe("plane-split P1 — standalone worker boot", () => {
     // (TANREN_RUNNER_IDENTITY_KEY_PATH), never a plaintext env value. The worker
     // reads the file and seeds the identity into the (shared) secret store at the
     // default ref so the workflow's SSH substrate can resolve it.
-    process.env["TANREN_RUN_WORKER_CONCURRENCY"] = "1";
     delete process.env["TANREN_RUNNER_IDENTITY_SECRET_REF"];
     const keyFile = join(mkdtempSync(join(tmpdir(), "tanren-runner-key-")), "id_ed25519");
     writeFileSync(keyFile, "FILE-PRIVATE-KEY");
@@ -144,7 +140,6 @@ describe("plane-split P1 — standalone worker boot", () => {
   });
 
   it("seeds the runner identity secret under a custom ref when TANREN_RUNNER_IDENTITY_SECRET_REF is set", async () => {
-    process.env["TANREN_RUN_WORKER_CONCURRENCY"] = "1";
     process.env["TANREN_RUNNER_IDENTITY_SECRET_REF"] = "runner/custom/key";
     const keyFile = join(mkdtempSync(join(tmpdir(), "tanren-runner-key-")), "id_ed25519");
     writeFileSync(keyFile, "CUSTOM-KEY");
@@ -168,7 +163,6 @@ describe("plane-split P1 — standalone worker boot", () => {
     // shared parsed env contract (`emptyToUndefined` + `.min(1)` + default) makes a
     // blank ref resolve to the validated default — observable here: the identity is
     // seeded under the default ref, and NOTHING is written under the empty ref "".
-    process.env["TANREN_RUN_WORKER_CONCURRENCY"] = "1";
     process.env["TANREN_RUNNER_IDENTITY_SECRET_REF"] = "";
     const keyFile = join(mkdtempSync(join(tmpdir(), "tanren-runner-key-")), "id_ed25519");
     writeFileSync(keyFile, "BLANK-REF-KEY");
@@ -188,7 +182,6 @@ describe("plane-split P1 — standalone worker boot", () => {
     // The plaintext-env path was removed (secrets are secret-mounts, never env
     // VALUES). Setting the legacy env var must NOT seed anything — only the key
     // FILE path is honored.
-    process.env["TANREN_RUN_WORKER_CONCURRENCY"] = "1";
     process.env["TANREN_RUNNER_IDENTITY_PRIVATE_KEY"] = "INLINE-PRIVATE-KEY";
     delete process.env["TANREN_RUNNER_IDENTITY_KEY_PATH"];
     const booted = await bootRunWorker();
@@ -201,7 +194,6 @@ describe("plane-split P1 — standalone worker boot", () => {
   });
 
   it("does not seed any identity secret when the key path is unset", async () => {
-    process.env["TANREN_RUN_WORKER_CONCURRENCY"] = "1";
     delete process.env["TANREN_RUNNER_IDENTITY_KEY_PATH"];
     const booted = await bootRunWorker();
     try {
@@ -214,7 +206,6 @@ describe("plane-split P1 — standalone worker boot", () => {
   });
 
   it("does not seed when the key path is the empty string", async () => {
-    process.env["TANREN_RUN_WORKER_CONCURRENCY"] = "1";
     process.env["TANREN_RUNNER_IDENTITY_KEY_PATH"] = "";
     const booted = await bootRunWorker();
     try {
@@ -230,14 +221,12 @@ describe("plane-split P1 — standalone worker boot", () => {
     // The de-privileged data plane must claim over mTLS. With no endpoint the boot
     // would silently revert to the direct `job_queue` DB-CAS — re-acquiring the very
     // privilege the split removes. Mode "standalone" makes that a LOUD boot failure.
-    process.env["TANREN_RUN_WORKER_CONCURRENCY"] = "1";
     await expect(bootRunWorker("standalone")).rejects.toThrow(/standalone data-plane worker requires the mTLS claim/u);
   });
 
   it("STANDALONE mode with the claim endpoint but remote-writes OFF FAILS BOOT (never silent direct writes)", async () => {
     // Claim endpoint + certs present, but remote-writes off → the worker would write
     // tenant tables directly on the de-privileged role. The guard rejects this too.
-    process.env["TANREN_RUN_WORKER_CONCURRENCY"] = "1";
     process.env["TANREN_CLAIM_ENDPOINT_URL"] = "https://orchestrator:3110";
     process.env["TANREN_DATA_PLANE_TLS_CERT"] = "/etc/tanren/mtls/worker.crt";
     process.env["TANREN_DATA_PLANE_TLS_KEY"] = "/etc/tanren/mtls/worker.key";
@@ -249,7 +238,6 @@ describe("plane-split P1 — standalone worker boot", () => {
   });
 
   it("STANDALONE mode with the claim endpoint set but certs MISSING FAILS BOOT (no unauthenticated channel)", async () => {
-    process.env["TANREN_RUN_WORKER_CONCURRENCY"] = "1";
     process.env["TANREN_CLAIM_ENDPOINT_URL"] = "https://orchestrator:3110";
     // No TANREN_DATA_PLANE_TLS_* certs — the partial-config guard fires.
     await expect(bootRunWorker("standalone")).rejects.toThrow(/mTLS cert env.*is incomplete/u);
@@ -259,7 +247,6 @@ describe("plane-split P1 — standalone worker boot", () => {
     // The default mode is "in-process": it shares the API pool, so the direct-DB
     // claim + writes are intended. No mTLS env set, yet boot succeeds — the guard
     // is gated on standalone mode only, so the dev/smoke path is unaffected.
-    process.env["TANREN_RUN_WORKER_CONCURRENCY"] = "1";
     const booted = await bootRunWorker("in-process");
     try {
       expect(booted.worker).toBeInstanceOf(RunWorker);

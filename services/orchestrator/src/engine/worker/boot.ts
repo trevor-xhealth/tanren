@@ -156,8 +156,10 @@ export async function bootRunWorker(mode: WorkerBootMode = "in-process"): Promis
   );
   // Concurrency is a GOVERNED CONFIG KNOB, not an env var (autonomy-engine.md
   // §1.4): resolve the worker's slot ceiling from the config surface's
-  // `AllocatorConfig.concurrency`. The future DagWalker reads the same
-  // per-project/org ceiling and throttles below it on live signals.
+  // `AllocatorConfig.concurrency`. This process serves EVERY tenant, so it boots on
+  // the schema default (no layers) — a single project's knob may not size the shared
+  // slot pool. The per-project/org ceiling is resolved and spent by the DagWalker
+  // (`buildConcurrencyResolver`), which knows the project it is walking.
   const concurrency = resolveWorkerConcurrency();
   log.info("concurrency ceiling resolved (config: allocator.concurrency)", { concurrency });
   // Hoisted so the run worker AND the P1d intake poller share the same allocator /
