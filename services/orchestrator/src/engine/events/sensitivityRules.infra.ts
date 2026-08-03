@@ -66,6 +66,14 @@ export const infraSensitivityRules: SensitivityRule[] = [
     ["workspacePath", "public"],
     ["repoUrl", "public"],
     ["targetBranch", "public"],
+    // A tool name, a version and the repo-relative file that declared it. All committed,
+    // non-secret bytes — and the whole point of recording them is that an operator (and
+    // an auditor) can read them.
+    ["toolchain[].tool", "public"],
+    ["toolchain[].declared", "public"],
+    ["toolchain[].resolved", "public"],
+    ["toolchain[].declaredIn", "public"],
+    ["toolchain[].versionDeclared", "public"],
   ]),
   ...rulesFor("workspace.git_captured", [
     ["workspacePath", "public"],

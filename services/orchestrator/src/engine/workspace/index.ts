@@ -1,6 +1,7 @@
 export * from "./bootstrap.js";
 export * from "./outputTail.js";
 export * from "./toolchainDeclarations.js";
+export * from "./toolchainEnforcement.js";
 export * from "./toolchainProvision.js";
 export * from "./contractMaterialize.js";
 export * from "./paths.js";

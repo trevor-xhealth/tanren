@@ -41,6 +41,13 @@ import {
   type ToolchainDetection,
   type ToolchainRequirement,
 } from "./toolchainDeclarations.js";
+import {
+  classifyUnhonoredDeclarations,
+  describeToolchainInEffect,
+  parseToolchainResolutions,
+  toolchainVerificationParts,
+  type ToolchainResolution,
+} from "./toolchainEnforcement.js";
 
 // The declaration READ + its invocation-bound framing live in ./toolchainDeclarationRead.ts
 // — the one seam in this area whose input is repository-controlled bytes. Re-exported so
@@ -90,10 +97,13 @@ export function toolchainProvisionCommand(detection: ToolchainDetection, workspa
   const scope = miseRunScope(workspacePath);
   const parts: string[] = [];
   for (const { path, reason } of detection.unresolved) {
-    // A declaration Tanren READ but cannot honor is announced, never dropped. It is
-    // not fatal on its own — the tool may not be one this repo's bootstrap needs — but
-    // it is surfaced here and quoted again by the missing-binary halt if it turns out
-    // that it was.
+    // A declaration Tanren READ but cannot honor is announced, never dropped. The
+    // `untranslatable-version` ones never reach this command at all — the caller
+    // (`resolveWorkspaceToolchain`) has already halted on them, because proceeding would
+    // gate the repo against a version it never declared. What is left here is the
+    // `unresolvable-declaration` remainder: Tanren identified no provisionable tool, so
+    // there is no version to be wrong about. Those are surfaced and quoted again by the
+    // missing-binary halt if it turns out the bootstrap needed that tool after all.
     parts.push(echo(`tanren: toolchain declaration NOT honored - ${path} ${reason}`));
   }
   if (detection.requirements.length === 0) {
@@ -142,10 +152,13 @@ export function toolchainProvisionCommand(detection: ToolchainDetection, workspa
     'eval "$__tanren_mise_env"',
   );
   for (const requirement of detection.requirements) {
-    parts.push(
-      `command -v ${quoteSshShellArg(requirement.bin)} >/dev/null 2>&1 || ` +
-        `{ ${echoErr(missingBinaryMessage(requirement))}; exit 1; }`,
-    );
+    // VERIFICATION (./toolchainEnforcement.ts): the binary must resolve, it must BE the
+    // one Tanren provisioned (not an image-baked copy earlier on PATH), mise must have
+    // resolved a concrete version for it, and that version must SATISFY what the repo
+    // declared. Each check exits nonzero naming the file, the declaration and what was
+    // actually found; on success it emits the machine-readable "in effect" frame that
+    // carries the resolved version out of the run.
+    parts.push(...toolchainVerificationParts(requirement));
   }
   // The marker is the ACTIVATION TRIGGER for every later command in this run
   // (ssh/miseActivate.ts branch 2). A marker that silently failed to write means every
@@ -183,10 +196,6 @@ function echo(message: string): string {
   return `printf '%s\\n' ${quoteSshShellArg(message)}`;
 }
 
-function echoErr(message: string): string {
-  return `printf '%s\\n' ${quoteSshShellArg(message)} >&2`;
-}
-
 // ---- Execution ------------------------------------------------------------------
 
 // A typed, observable toolchain-provisioning failure (environment-management.md §3).
@@ -216,11 +225,21 @@ export interface ProvisionMiseToolchainInput {
 }
 
 /**
- * Read the toolchain declarations the workspace ships and resolve them into
- * requirements. ONE round-trip. A substrate/transport failure is NOT read as "the repo
- * declares nothing" — it throws {@link WorkspaceMiseProvisionError}, so a transient
- * hiccup can never be mistaken for a no-toolchain repo (the precise mistake, in its
- * silent form, that this whole change exists to remove).
+ * Read the toolchain declarations the workspace ships, resolve them into requirements,
+ * and ENFORCE that every version declaration Tanren read is one it can honor. ONE
+ * round-trip. A substrate/transport failure is NOT read as "the repo declares nothing" —
+ * it throws {@link WorkspaceMiseProvisionError}, so a transient hiccup can never be
+ * mistaken for a no-toolchain repo (the precise mistake, in its silent form, that this
+ * whole change exists to remove).
+ *
+ * THE ENFORCEMENT LIVES HERE, at the single choke point BOTH provisioning paths pass
+ * through (workspace-prep's `provisionMiseToolchain` and the per-gate
+ * `ensureWorkspaceDepsInstalled`) — one place, so the two can never drift into disagreeing
+ * about whether an unhonored declaration is fatal. A declaration whose VERSION Tanren
+ * cannot translate for a tool it CAN provision throws {@link WorkspaceToolchainUnhonoredError}
+ * BEFORE any provision command is built: proceeding would run the repo's own gate against
+ * whatever copy of that tool the image happens to carry, which is the silent degradation
+ * this closes. See ./toolchainEnforcement.ts for what is deliberately NOT claimed.
  */
 export async function resolveWorkspaceToolchain(input: ProvisionMiseToolchainInput): Promise<ToolchainDetection> {
   // ONE nonce per read: the frames the runner emits back are trusted only if they carry it,
@@ -240,7 +259,21 @@ export async function resolveWorkspaceToolchain(input: ProvisionMiseToolchainInp
       result.stalled === true,
     );
   }
-  return detectToolchainRequirements(parseToolchainDeclarationOutput(result.stdout, nonce));
+  const detection = detectToolchainRequirements(parseToolchainDeclarationOutput(result.stdout, nonce));
+  const unhonored = classifyUnhonoredDeclarations(input.workspacePath, detection);
+  if (unhonored !== undefined) {
+    throw unhonored;
+  }
+  return detection;
+}
+
+/** What a provision concluded: the declarations Tanren read, and — the part an operator
+ * needs and previously could not get — the concrete version each declared tool ACTUALLY
+ * resolved to on the runner. Carried as a value so "which version ran" survives the
+ * console line scrolling past; the run's `workspace.prepared` event records it. */
+export interface ToolchainProvisionOutcome {
+  readonly detection: ToolchainDetection;
+  readonly resolutions: readonly ToolchainResolution[];
 }
 
 /**
@@ -249,17 +282,20 @@ export async function resolveWorkspaceToolchain(input: ProvisionMiseToolchainInp
  *
  * Detection is Layer 1 (./toolchainDeclarations.ts): a repo `mise.toml` if it ships one,
  * otherwise the standard declaration files it does ship. Provisioning is Layer 2, and is
- * mise either way. Verification is the part that did not exist before: the command exits
- * nonzero, naming the tool and the file that declared it, if a declared binary is not on
- * PATH afterwards. A nonzero exit / stall / substrate failure throws
- * {@link WorkspaceMiseProvisionError} so the run halts LOUDLY. This is the PROJECT path;
- * it never touches Tanren's harness (codex keeps the runner's isolated node — mise is
- * still never globally activated).
+ * mise either way. VERIFICATION now covers the version, not only the binary: a declaration
+ * Tanren could not translate never gets this far (`resolveWorkspaceToolchain` throws
+ * {@link WorkspaceToolchainUnhonoredError}), and for everything it DID provision the
+ * command exits nonzero if the binary is missing, is not the one Tanren provisioned, or
+ * resolved to a version that does not satisfy what the repo declared. A nonzero exit /
+ * stall / substrate failure throws {@link WorkspaceMiseProvisionError} so the run halts
+ * LOUDLY. This is the PROJECT path; it never touches Tanren's harness (codex keeps the
+ * runner's isolated node — mise is still never globally activated).
  *
  * Returns the detection so the caller can attribute a later missing-binary failure to
- * what the repo did (and did not) declare.
+ * what the repo did (and did not) declare, plus the RESOLVED versions so the run can
+ * record which toolchain was actually in effect.
  */
-export async function provisionMiseToolchain(input: ProvisionMiseToolchainInput): Promise<ToolchainDetection> {
+export async function provisionMiseToolchain(input: ProvisionMiseToolchainInput): Promise<ToolchainProvisionOutcome> {
   const detection = await resolveWorkspaceToolchain(input);
   const result = await input.ssh.run(input.target, {
     // `set -e` so any failing step in the provision chain surfaces a nonzero exit.
@@ -275,7 +311,7 @@ export async function provisionMiseToolchain(input: ProvisionMiseToolchainInput)
       result.stalled === true,
     );
   }
-  return detection;
+  return { detection, resolutions: parseToolchainResolutions(result.stdout) };
 }
 
 // ---- Infrastructure-fault classification ----------------------------------------
@@ -306,8 +342,12 @@ export class WorkspaceToolchainUnavailableError extends Error {
     readonly exitCode: number | null,
     readonly outputTail: string,
     readonly detection: ToolchainDetection,
+    /** What the declared tools ACTUALLY resolved to on this runner, when the run got far
+     * enough to verify them. Quoted in the message so a missing-binary halt also answers
+     * "…and which versions WERE in effect" without the operator hunting for the line. */
+    readonly resolutions: readonly ToolchainResolution[] = [],
   ) {
-    super(toolchainUnavailableMessage(command, missingBinary, detection, exitCode, outputTail));
+    super(toolchainUnavailableMessage(command, missingBinary, detection, exitCode, outputTail, resolutions));
   }
 }
 
@@ -340,6 +380,7 @@ export function classifyToolchainFault(input: {
    * (the exit code of a stall is `null`) instead of saying the command stopped responding. */
   stalled: boolean;
   detection: ToolchainDetection;
+  resolutions?: readonly ToolchainResolution[];
 }): WorkspaceToolchainUnavailableError | undefined {
   if (input.stalled) {
     return undefined;
@@ -359,6 +400,7 @@ export function classifyToolchainFault(input: {
     input.exitCode,
     input.outputTail,
     input.detection,
+    input.resolutions ?? [],
   );
 }
 
@@ -368,6 +410,7 @@ function toolchainUnavailableMessage(
   detection: ToolchainDetection,
   exitCode: number | null,
   outputTail: string,
+  resolutions: readonly ToolchainResolution[],
 ): string {
   const declared =
     detection.requirements.length === 0
@@ -385,6 +428,7 @@ function toolchainUnavailableMessage(
     `Tanren provisions a toolchain from what a repository DECLARES: its own mise.toml, or the standard ` +
       `declaration files (${[...TOOLCHAIN_CONTENT_DECLARATION_PATHS, ...TOOLCHAIN_PRESENCE_DECLARATION_PATHS].join(", ")}).`,
     `Detected here: ${declared}.${notHonored}`,
+    `Toolchain actually in effect on this runner: ${describeToolchainInEffect(resolutions)}.`,
     detection.unresolved.some((u) => u.tool === missingBinary)
       ? `'${missingBinary}' WAS declared, but Tanren could not turn that declaration into a provisionable tool. ` +
         `Declare it in a mise.toml, which mise resolves directly, or make it available on the runner image.`

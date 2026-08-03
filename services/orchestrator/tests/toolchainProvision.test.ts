@@ -9,7 +9,10 @@
 //       at a loop no source edit can win.
 //
 // This file asserts command STRINGS, which is exactly as far as a unit test can see. What
-// those strings DO on a real runner is a separate proof (see the container suite).
+// those strings DO on a real runner is a separate proof:
+// `services/orchestrator/tests/toolchainContainer.integration.test.ts`, driven by
+// `just smoke-toolchain-container`, which `just smoke` (ci-heavy step 2) depends on. It is
+// WIRED, not hand-run — a container proof nothing executes is a claim, not a proof.
 
 import { describe, expect, it } from "vitest";
 import type { RunnerHandle } from "../src/engine/contracts/allocator.js";
@@ -23,6 +26,7 @@ import {
   withMiseActivation,
 } from "../src/engine/ssh/miseActivate.js";
 import { detectToolchainRequirements } from "../src/engine/workspace/toolchainDeclarations.js";
+import { WorkspaceToolchainUnhonoredError } from "../src/engine/workspace/toolchainEnforcement.js";
 import {
   classifyToolchainFault,
   NO_DECLARATION_NOTICE,
@@ -151,9 +155,14 @@ describe("toolchainProvisionCommand · installs AND proves the binaries are ther
     // `--global`: the runner user's mise config, never a file written into the repo.
     expect(command).toContain("mise use --global 'pnpm@11.19.0' 'uv@latest'");
     expect(command).not.toContain("mise.toml");
-    // VERIFICATION — the part that did not exist. Each declared binary must resolve.
-    expect(command).toContain("command -v 'pnpm' >/dev/null 2>&1 ||");
-    expect(command).toContain("command -v 'uv' >/dev/null 2>&1 ||");
+    // VERIFICATION — the part that did not exist. Each declared binary must resolve…
+    expect(command).toContain("command -v 'pnpm'");
+    expect(command).toContain("command -v 'uv'");
+    // …must BE the binary Tanren provisioned (not an image-baked copy earlier on PATH)…
+    expect(command).toContain("mise which 'pnpm'");
+    // …and must have a concrete resolved version, which is reported out of the run.
+    expect(command).toContain("mise current 'pnpm'");
+    expect(command).toContain("===TANREN-TOOLCHAIN-IN-EFFECT:");
     // …and the failure names the tool AND the file that declared it.
     expect(command).toContain("package.json declares pnpm@11.19.0");
     expect(command).toContain("uv.lock declares uv@latest");
@@ -183,14 +192,32 @@ describe("toolchainProvisionCommand · installs AND proves the binaries are ther
     expect(command).not.toContain(TOOLCHAIN_VERIFIED_NOTICE);
   });
 
-  it("announces a declaration it read but could not honor", () => {
+  it("announces a declaration it read but could not RESOLVE to any tool", () => {
+    // This is the kind that stays a notice: Tanren identified no provisionable tool, so
+    // there is no version it could be running wrongly. (The `untranslatable-version`
+    // kind never reaches this command at all — see the enforcement suite below.)
     const command = toolchainProvisionCommand(
-      detectToolchainRequirements([{ path: ".nvmrc", contents: "lts/iron\n" }]),
+      detectToolchainRequirements([{ path: "package.json", contents: "{ not json" }]),
       RUN_A,
     );
-    expect(command).toContain("toolchain declaration NOT honored - .nvmrc");
+    expect(command).toContain("toolchain declaration NOT honored - package.json");
   });
 
+  it("checks a DECLARED version for satisfaction, and leaves an unconstrained one alone", () => {
+    const command = toolchainProvisionCommand(
+      detectToolchainRequirements([
+        { path: ".nvmrc", contents: "24\n" },
+        { path: "uv.lock", contents: "" },
+      ]),
+      RUN_A,
+    );
+    // The component-wise-prefix policy, as two literal shell patterns: `24` is satisfied
+    // by `24` itself or by anything under `24.` — never by `241.x`.
+    expect(command).toContain(`case "$__tanren_version" in '24'|'24.'*) : ;;`);
+    // A lockfile constrained no version, so there is nothing to satisfy — and Tanren does
+    // not invent one to check against.
+    expect(command).not.toContain(`in 'latest'|'latest.'*`);
+  });
   // REGRESSION, and the reason this assertion exists at all. The detected-toolchain
   // provision is a THIRD mise seam beside the two that already source the image's
   // published shared data dir (the activation prelude, and the repo-owns-a-mise.toml
@@ -462,14 +489,35 @@ describe("provisionMiseToolchain · a substrate failure is never read as no-tool
 
   it("reads, then provisions, and returns what it detected", async () => {
     const ssh = new AnsweringSsh((read) => frameFor(read, "package.json") + '{"packageManager":"pnpm@11.19.0"}\n');
-    const detection = await provisionMiseToolchain({ ssh, target, workspacePath });
-    expect(detection.requirements.map((r) => r.bin)).toEqual(["pnpm"]);
+    const outcome = await provisionMiseToolchain({ ssh, target, workspacePath });
+    expect(outcome.detection.requirements.map((r) => r.bin)).toEqual(["pnpm"]);
     // EXACTLY two round-trips — read, then provision. The scripted substrate answers a
     // bare success past the end of its script, so without this an added third call would
     // pass every other assertion in this test silently.
     expect(ssh.commands).toHaveLength(2);
     expect(ssh.commands[1]).toContain("set -e; ");
     expect(ssh.commands[1]).toContain("mise use --global 'pnpm@11.19.0'");
+  });
+
+  it("HALTS before provisioning anything when a declared version cannot be honored", async () => {
+    // The whole point: the second round-trip never happens. Tanren does not run a
+    // provision, print a notice and then let the project build on an undeclared version.
+    const ssh = new ScriptedSsh([ok("===TANREN-TOOLCHAIN-DECLARATION:.nvmrc===\nlts/iron\n")]);
+    await expect(provisionMiseToolchain({ ssh, target, workspacePath })).rejects.toBeInstanceOf(
+      WorkspaceToolchainUnhonoredError,
+    );
+    expect(ssh.commands).toHaveLength(1);
+  });
+
+  it("carries the versions that were actually in effect back out of the provision", async () => {
+    const ssh = new ScriptedSsh([
+      ok("===TANREN-TOOLCHAIN-DECLARATION:.nvmrc===\n24\n"),
+      ok("===TANREN-TOOLCHAIN-IN-EFFECT:node|24|24.18.1|.nvmrc|pinned===\n"),
+    ]);
+    const outcome = await provisionMiseToolchain({ ssh, target, workspacePath });
+    expect(outcome.resolutions).toEqual([
+      { tool: "node", declared: "24", resolved: "24.18.1", declaredIn: ".nvmrc", versionDeclared: true },
+    ]);
   });
 
   it("throws when the provision itself fails — a LOUD halt, never a silent skip", async () => {

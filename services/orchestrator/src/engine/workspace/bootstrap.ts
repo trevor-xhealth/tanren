@@ -13,6 +13,7 @@ import { withMiseActivation } from "../ssh/miseActivate.js";
 import { buildActivityWatchdog } from "../ssh/activityWatchdog.js";
 import { combinedOutput, failureReason, tailOf } from "./outputTail.js";
 import { classifyToolchainFault, resolveWorkspaceToolchain, toolchainProvisionCommand } from "./toolchainProvision.js";
+import { parseToolchainResolutions, type ToolchainResolution } from "./toolchainEnforcement.js";
 import { runWorkspaceSshCommand } from "./ssh.js";
 
 // The commit message used for the synthetic post-bootstrap commit. Install
@@ -177,6 +178,11 @@ export interface EnsureWorkspaceDepsInput {
 // iterations) rather than latching on this flag.
 export interface EnsureWorkspaceDepsResult {
   installed: boolean;
+  // Which version each DECLARED tool actually resolved to on the runner for THIS gate.
+  // Empty when the repo declared nothing Tanren provisions (or the guard took the no-op
+  // branch). Re-read every gate for the same reason the declarations are: a writer may
+  // have added or changed one since the last one.
+  toolchain: readonly ToolchainResolution[];
 }
 
 // A typed, observable deps-install failure, mirroring WorkspaceBootstrapError.
@@ -303,6 +309,9 @@ export async function ensureWorkspaceDepsInstalled(
       // A stall is not a missing binary — see the `stalled` note on classifyToolchainFault.
       stalled: result.stalled === true,
       detection,
+      // Whatever the provision managed to verify before the bootstrap died, so the halt
+      // reports the toolchain that WAS in effect alongside the binary that was not.
+      resolutions: parseToolchainResolutions(result.stdout),
     });
     if (infraFault !== undefined) {
       throw infraFault;
@@ -318,7 +327,10 @@ export async function ensureWorkspaceDepsInstalled(
   // The install branch echoes DEPS_INSTALL_SENTINEL before running; its presence
   // on stdout tells the caller the install path was taken (vs the no-op skip), so
   // it can cache "deps installed" and skip the stat round-trip on the next gate.
-  return { installed: result.stdout.includes(DEPS_INSTALL_SENTINEL) };
+  return {
+    installed: result.stdout.includes(DEPS_INSTALL_SENTINEL),
+    toolchain: parseToolchainResolutions(result.stdout),
+  };
 }
 
 function depsInstallFailureMessage(
