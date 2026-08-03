@@ -81,7 +81,10 @@ describe("SSH substrate connect-config shape (apex v44 regression)", () => {
     let mtime = 0;
     const runPromise = substrate.run(target, {
       command: "codex --json",
-      watchdog: { livenessProbe: () => Promise.resolve(`ws:${(mtime += 1)}`), probeIntervalMs: 1_000 },
+      watchdog: {
+        livenessProbe: () => Promise.resolve({ observed: true as const, signature: `ws:${(mtime += 1)}` }),
+        probeIntervalMs: 1_000,
+      },
     });
     // Let exec/ready settle so the command is up (watchdog armed).
     await vi.advanceTimersByTimeAsync(0);

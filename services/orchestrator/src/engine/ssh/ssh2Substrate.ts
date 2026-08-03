@@ -8,12 +8,27 @@ import type {
   RunnerCommand,
   CommandResult,
   CommandSubstrate,
+  ProbeObservation,
+  StallKind,
 } from "../contracts/commandSubstrate.js";
-import { defineFailure } from "../failure.js";
-import { RecentOutputWindow, RetainedOutput } from "./boundedOutput.js";
 import { buildSshExecCommand } from "./command.js";
 import { hostKeyFingerprintMatches } from "./fingerprint.js";
-import { appendWorkSignature, distinctRecentOutput, isWedgedNonAdvancing, workSignature } from "./watchdogProgress.js";
+import {
+  capturedOutput,
+  createRunState,
+  formatTarget,
+  messageFromError,
+  type RunState,
+  sshFailureResult,
+  stallKindMessage,
+} from "./runState.js";
+import {
+  appendWorkSignature,
+  distinctRecentOutput,
+  isWedgedNonAdvancing,
+  MIN_UNOBSERVABLE_PROBE_REPEATS,
+  workSignature,
+} from "./watchdogProgress.js";
 
 // The default cadence at which the activity watchdog consults its `livenessProbe`
 // between output chunks. A poll INTERVAL (how often to ask "is it alive?"), NOT a
@@ -37,37 +52,6 @@ export interface SshCommandSubstrateOptions {
   serverHostKeyAlgorithms?: ServerHostKeyAlgorithm[];
 }
 
-interface RunState {
-  // Captured output under the command's declared retention policy (F-9). `"full"` (the
-  // default) is byte-for-byte the old `+=` accumulation; `"bounded"` retains a head + tail
-  // and reports the elision out of band. See ssh/boundedOutput.ts for why this is opt-in.
-  stdout: RetainedOutput;
-  stderr: RetainedOutput;
-  // The trailing window of output the WATCHDOG fingerprints, drained on every probe tick.
-  // It is a SEPARATE, bounded buffer rather than a cursor into the retained streams: the
-  // old code re-concatenated `state.stdout + state.stderr` on EVERY tick (an O(total) copy
-  // of a possibly hundreds-of-MB buffer every cadence) and indexed it by a char offset,
-  // which additionally mis-tracks because stdout growth shifts the stderr region. Draining
-  // a window is O(new output) and is unaffected by how much has been retained or elided.
-  recentOutput: RecentOutputWindow;
-  exitCode: number | null;
-  signal?: string;
-  settled: boolean;
-  // Activity-watchdog state (the SOLE hang-detection path — there is no wall-clock
-  // kill timer). `probeTimer` is the recurring work-signature poll tick. `lastActivityAt`
-  // marks the most recent OUTPUT chunk (diagnostic only — feeds the `quietForMs` evidence);
-  // `lastProbeTickAt` is when the watchdog last evaluated. `workSignatures` is the trailing
-  // sequence of WORK SIGNATURES (output tail folded with the workspace signature) the
-  // PROGRESS backstop reasons over via the shared convergence detector — a CHANGING signature
-  // is genuine advancement (continue UNBOUNDED), a FIXED POINT is a wedge (dead OR busy-but-
-  // not-advancing). None is a total-duration budget — the trigger is signature identity, not
-  // elapsed time, so the command runs UNBOUNDED while its work signature advances.
-  probeTimer?: NodeJS.Timeout;
-  lastActivityAt: number;
-  lastProbeTickAt?: number;
-  workSignatures: string[];
-}
-
 export class SshCommandSubstrate implements CommandSubstrate {
   private readonly clientFactory: Ssh2ClientFactory;
 
@@ -85,14 +69,14 @@ export class SshCommandSubstrate implements CommandSubstrate {
     const target = asSshRunnerHandle(handle);
     const identity = await this.secrets.get(target.identitySecretRef);
     if (identity === undefined) {
-      return this.failureResult(target, `missing SSH identity secret: ${target.identitySecretRef}`);
+      return sshFailureResult(target, `missing SSH identity secret: ${target.identitySecretRef}`);
     }
 
     let execCommand: string;
     try {
       execCommand = buildSshExecCommand(command);
     } catch (error) {
-      return this.failureResult(target, messageFromError(error));
+      return sshFailureResult(target, messageFromError(error));
     }
 
     return await this.runClient(target, command, identity.value, execCommand);
@@ -110,15 +94,7 @@ export class SshCommandSubstrate implements CommandSubstrate {
       // parse/count across the whole stream must never be truncated implicitly. A call
       // site opts into "bounded" when it can show only a tail is read.
       const retention = command.outputRetention ?? "full";
-      const state: RunState = {
-        stdout: new RetainedOutput(retention),
-        stderr: new RetainedOutput(retention),
-        recentOutput: new RecentOutputWindow(),
-        exitCode: null,
-        settled: false,
-        lastActivityAt: Date.now(),
-        workSignatures: [],
-      };
+      const state: RunState = createRunState(retention);
       let hostKeyFailure: string | undefined;
 
       // The watchdog is the SOLE hang detector — every command runs one. When the
@@ -147,7 +123,7 @@ export class SshCommandSubstrate implements CommandSubstrate {
       const fail = (message: string): void => {
         settle(
           {
-            ...this.failureResult(target, message),
+            ...sshFailureResult(target, message),
             ...capturedOutput(state),
           },
           "destroy",
@@ -321,7 +297,13 @@ export class SshCommandSubstrate implements CommandSubstrate {
     client: Ssh2Client,
     resolve: (result: CommandResult) => void,
   ): Promise<void> {
-    if (state.settled) {
+    // RE-ENTRY GUARD (F-10). The tick runs on a `setInterval`, so when a probe is slower
+    // than the cadence the ticks USED to overlap — each opening its own SSH exec channel
+    // against the very runner that is already struggling, compounding the slowness that
+    // triggered it. A tick that arrives while the previous probe is still in flight is
+    // simply skipped: the in-flight probe will report, and nothing about the running command
+    // is bounded by how many ticks we skipped.
+    if (state.settled || state.probeInFlight) {
       return;
     }
     state.lastProbeTickAt = Date.now();
@@ -331,25 +313,26 @@ export class SshCommandSubstrate implements CommandSubstrate {
     // The output content folded INTO the signature is what distinguishes a streaming process
     // (new distinct lines = an advancing signature) from a wedged-busy one (byte-identical
     // output = a fixed signature, however fast it repeats); for SILENT ops the probe IS the
-    // signal (the workspace tree growing — count + bytes). The probe returns `undefined` when the runner is
-    // UNREACHABLE (no signal — folded as a fixed sentinel, so a dead process reads non-advancing).
-    let workspaceSig: string | undefined;
-    if (watchdog.livenessProbe !== undefined) {
-      try {
-        workspaceSig = await watchdog.livenessProbe();
-      } catch {
-        // A probe that THREW reached no signal — workspaceSig stays its declared default (the
-        // unreachable sentinel), exactly as a probe that returned undefined: non-advancing.
-      }
-      if (state.settled) {
-        return;
-      }
+    // signal (blocks/inodes consumed + the workspace's top-level digest).
+    const observation = await this.readObservation(state, watchdog);
+    if (state.settled) {
+      return;
     }
     // DRAIN the bounded recent-output window (F-9): everything that arrived since the last
     // tick, deduped to its DISTINCT lines (rate-independent — see distinctRecentOutput).
     // `priorLen` is 0 because the window already contains only the increment — no
     // re-concatenation of the whole retained stream, and no char cursor to keep in sync.
     const recent = distinctRecentOutput(state.recentOutput.drain(), 0);
+    // An UNOBSERVABLE probe is NOT a fixed point (F-10) — it is the ABSENCE of evidence, and
+    // it is routed away from the progress read entirely so a slow or failing side-channel can
+    // never be re-told as "the step stalled". A watchdog with NO probe at all is a different
+    // case: output alone decides, exactly as before.
+    if (watchdog.livenessProbe !== undefined && observation?.observed !== true) {
+      this.tickUnobservable(target, state, onQuiet, recent.content, client, resolve);
+      return;
+    }
+    state.unobservableProbeStreak = 0;
+    const workspaceSig = observation?.observed === true ? observation.signature : undefined;
     const signature = workSignature(recent.content, workspaceSig);
     const priorSignature = state.workSignatures.at(-1);
     state.workSignatures = appendWorkSignature(state.workSignatures, signature);
@@ -388,7 +371,54 @@ export class SshCommandSubstrate implements CommandSubstrate {
     // `quietForMs` is EVIDENCE of how long since the last output — diagnostic only; the trigger
     // is the non-advancing work signature, never a fixed quiet duration on its own.
     const quietForMs = Date.now() - state.lastActivityAt;
-    this.fireWatchdog(target, state, onQuiet, quietForMs, client, resolve);
+    this.fireWatchdog(target, state, onQuiet, quietForMs, client, resolve, "no_progress");
+  }
+
+  // Run the probe under the re-entry guard. Returns `undefined` when the watchdog has no
+  // probe at all (the output-only class — output alone decides, exactly as before). A probe
+  // that THREW is an unobservable read, not a signature and not a fixed point.
+  private async readObservation(state: RunState, watchdog: ActivityWatchdog): Promise<ProbeObservation | undefined> {
+    if (watchdog.livenessProbe === undefined) {
+      return undefined;
+    }
+    state.probeInFlight = true;
+    try {
+      return await watchdog.livenessProbe();
+    } catch {
+      return { observed: false, reason: "probe_failed" };
+    } finally {
+      state.probeInFlight = false;
+    }
+  }
+
+  // A tick whose probe OBSERVED NOTHING (F-10). The old code folded this into a fixed
+  // sentinel, so two consecutive slow/failed reads reached the progress floor and aborted a
+  // healthy step. It now contributes NOTHING to the work-signature history — the trailing
+  // streak neither advances nor resets — and is tracked on its own, wider streak instead.
+  //
+  //   - New distinct output this tick? The step is demonstrably alive whether or not we can
+  //     see its workspace: reset the streak and stop.
+  //   - Otherwise the streak grows, and only once it reaches MIN_UNOBSERVABLE_PROBE_REPEATS
+  //     do we surface — under `"probe_unobservable"`, never disguised as a stalled agent —
+  //     so a permanently blind probe cannot leave a genuinely wedged step unwatched forever.
+  private tickUnobservable(
+    target: SshRunnerHandle,
+    state: RunState,
+    onQuiet: "surface" | "kill",
+    recentContent: string,
+    client: Ssh2Client,
+    resolve: (result: CommandResult) => void,
+  ): void {
+    if (recentContent !== "") {
+      state.unobservableProbeStreak = 0;
+      return;
+    }
+    state.unobservableProbeStreak += 1;
+    if (state.unobservableProbeStreak < MIN_UNOBSERVABLE_PROBE_REPEATS) {
+      return;
+    }
+    const quietForMs = Date.now() - state.lastActivityAt;
+    this.fireWatchdog(target, state, onQuiet, quietForMs, client, resolve, "probe_unobservable");
   }
 
   // The watchdog fired on a genuine absence of all signals. SURFACE a recoverable `stalled`
@@ -400,6 +430,7 @@ export class SshCommandSubstrate implements CommandSubstrate {
     quietForMs: number,
     client: Ssh2Client,
     resolve: (result: CommandResult) => void,
+    stallKind: StallKind,
   ): void {
     if (state.settled) {
       return;
@@ -415,48 +446,17 @@ export class SshCommandSubstrate implements CommandSubstrate {
         ...capturedOutput(state),
         signal: state.signal,
         stalled: true,
+        stallKind,
         quietForMs,
       });
       return;
     }
     resolve({
-      ...this.failureResult(target, "SSH command showed no sign of life (dead/zombied/deadlocked) and was terminated"),
+      ...sshFailureResult(target, stallKindMessage(stallKind)),
       ...capturedOutput(state),
       stalled: true,
+      stallKind,
       quietForMs,
     });
   }
-
-  private failureResult(target: SshRunnerHandle, message: string): CommandResult {
-    return {
-      exitCode: null,
-      stdout: "",
-      stderr: "",
-      failure: defineFailure({ kind: "ssh_failed", target: formatTarget(target), message }),
-    };
-  }
-}
-
-// The captured-output fields of a result, materialized from the two retention buffers.
-// `stdoutElidedChars`/`stderrElidedChars` are omitted when nothing was dropped, so a
-// `"full"` result is byte-for-byte and field-for-field what it always was.
-function capturedOutput(
-  state: RunState,
-): Pick<CommandResult, "stdout" | "stderr" | "stdoutElidedChars" | "stderrElidedChars"> {
-  const stdoutElided = state.stdout.elidedChars;
-  const stderrElided = state.stderr.elidedChars;
-  return {
-    stdout: state.stdout.text(),
-    stderr: state.stderr.text(),
-    ...(stdoutElided > 0 ? { stdoutElidedChars: stdoutElided } : {}),
-    ...(stderrElided > 0 ? { stderrElidedChars: stderrElided } : {}),
-  };
-}
-
-function formatTarget(target: SshRunnerHandle): string {
-  return `${target.username}@${target.host}:${target.port}`;
-}
-
-function messageFromError(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
 }

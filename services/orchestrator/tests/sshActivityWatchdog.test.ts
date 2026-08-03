@@ -5,14 +5,19 @@ import type { RunnerHandle } from "../src/engine/contracts/allocator.js";
 import type { ActivityWatchdog } from "../src/engine/contracts/commandSubstrate.js";
 import { FakeSecretStore } from "../src/engine/contracts/secretStore.js";
 import { SshCommandSubstrate } from "../src/engine/ssh/index.js";
+import {
+  MIN_NON_ADVANCING_NEIGHBOR_REPEATS_VCS,
+  MIN_UNOBSERVABLE_PROBE_REPEATS,
+} from "../src/engine/ssh/watchdogProgress.js";
 
 // The ActivityWatchdog is the doctrine's progress-based replacement for the wall-clock
 // kill (feedback_no_timeouts_progress_based): a process making genuine PROGRESS is NEVER
 // killed regardless of elapsed time; the watchdog fires ONLY when the WORK SIGNATURE is at
 // a fixed point (no new output AND no workspace advance across successive checks — a wedge,
 // whether dead OR busy-but-not-advancing), and SURFACES a recoverable stall by default.
-// The `livenessProbe` returns the remote WORK SIGNATURE (the workspace mtime), `undefined`
-// when unreachable. These tests drive the real SshCommandSubstrate against a controllable
+// The `livenessProbe` returns a discriminated OBSERVATION: `{ observed: true, signature }`
+// carries real evidence about the workspace, `{ observed: false, reason }` carries NONE (F-10 —
+// a slow or failed probe must never be re-told as "the step stalled"). These tests drive the real SshCommandSubstrate against a controllable
 // fake ssh2 client with fake timers so we control the probe ticks deterministically.
 
 const target: RunnerHandle = {
@@ -87,7 +92,7 @@ describe("SSH activity watchdog (progress-based hang detection)", () => {
     // progress, must never be killed no matter the elapsed time.
     let mtime = 1_000;
     const watchdog: ActivityWatchdog = {
-      livenessProbe: () => Promise.resolve(`ws:${(mtime += 1)}`),
+      livenessProbe: () => Promise.resolve({ observed: true as const, signature: `ws:${(mtime += 1)}` }),
       probeIntervalMs: 1_000,
     };
 
@@ -110,7 +115,7 @@ describe("SSH activity watchdog (progress-based hang detection)", () => {
     // A probe whose workspace signature NEVER advances (a fixed mtime) — output alone, as long
     // as it is genuinely NEW content, must keep the watchdog reset (the streaming-agent case).
     const watchdog: ActivityWatchdog = {
-      livenessProbe: () => Promise.resolve("ws:1000"),
+      livenessProbe: () => Promise.resolve({ observed: true as const, signature: "ws:1000" }),
       probeIntervalMs: 1_000,
     };
 
@@ -142,7 +147,7 @@ describe("SSH activity watchdog (progress-based hang detection)", () => {
       // progress with no output. Must never be flagged.
       livenessProbe: () => {
         aliveChecks += 1;
-        return Promise.resolve(`ws:${(mtime += 1)}`);
+        return Promise.resolve({ observed: true as const, signature: `ws:${(mtime += 1)}` });
       },
       probeIntervalMs: 1_000,
     };
@@ -159,27 +164,52 @@ describe("SSH activity watchdog (progress-based hang detection)", () => {
     expect(c.state.destroyCount).toBe(0);
   });
 
-  it("SURFACES a recoverable stall on a DEAD process: no output, probe unreachable (default onQuiet)", async () => {
+  it("SURFACES a recoverable stall when the runner stays UNOBSERVABLE and the op is silent", async () => {
     vi.useFakeTimers();
     const c = createControllableClient();
     const substrate = await makeSubstrate(c.client);
-    // No output AND the probe reports NO signal (undefined = unreachable/gone) — a
-    // dead/zombied/deadlocked process. The work signature is fixed across checks.
-    const watchdog: ActivityWatchdog = { livenessProbe: () => Promise.resolve(), probeIntervalMs: 1_000 };
+    // No output AND a probe that can never see the runner. This is NOT evidence of
+    // non-progress (F-10), so it does not feed the work-signature fixed-point read - but a
+    // long consecutive run of blind ticks is still worth surfacing, under its own kind, so a
+    // permanently blind probe cannot leave a wedged step unwatched forever.
+    const watchdog: ActivityWatchdog = {
+      livenessProbe: () => Promise.resolve({ observed: false as const, reason: "unreachable" as const }),
+      probeIntervalMs: 1_000,
+    };
 
     const runPromise = substrate.run(target, { command: "jj rebase", watchdog });
-    // The work signature is established on the first check and proven non-advancing across
-    // enough consecutive identical-neighbor pairs to meet MIN_NON_ADVANCING_NEIGHBOR_REPEATS
-    // (apex v50: a single mid-IO-burst identical probe is not yet a wedge; the watchdog
-    // requires the streak floor). Signature IDENTITY, not elapsed time → fire.
-    await vi.advanceTimersByTimeAsync(4_000);
+    // Deliberately LATER than the progress floor: absence of observation is weaker evidence
+    // than an observed fixed point. A streak on observation OUTCOMES, never elapsed time.
+    await vi.advanceTimersByTimeAsync(1_000 * (MIN_UNOBSERVABLE_PROBE_REPEATS + 2));
     const result = await runPromise;
 
     expect(result.stalled).toBe(true);
+    expect(result.stallKind).toBe("probe_unobservable");
     // SURFACED, not a hard transport failure.
     expect(result.failure).toBeUndefined();
     expect(typeof result.quietForMs).toBe("number");
     expect(c.state.destroyCount).toBe(1);
+  });
+
+  it("does NOT stall at the PROGRESS floor when the probe is merely unobservable (F-10)", async () => {
+    vi.useFakeTimers();
+    const c = createControllableClient();
+    const substrate = await makeSubstrate(c.client);
+    const watchdog: ActivityWatchdog = {
+      livenessProbe: () => Promise.resolve({ observed: false as const, reason: "probe_failed" as const }),
+      probeIntervalMs: 1_000,
+    };
+
+    const runPromise = substrate.run(target, { command: "just ci", watchdog });
+    // The old fold aborted the step right here. A failing side-channel says nothing about
+    // whether the step is advancing, so the step must still be running.
+    await vi.advanceTimersByTimeAsync(1_000 * (MIN_NON_ADVANCING_NEIGHBOR_REPEATS_VCS + 1));
+    c.emitClose(0);
+    const result = await runPromise;
+
+    expect(result.stalled).toBeFalsy();
+    expect(result.exitCode).toBe(0);
+    expect(c.state.destroyCount).toBe(0);
   });
 
   it("SURFACES a stall on a WEDGED-BUT-BUSY process: byte-identical output forever, workspace flat", async () => {
@@ -191,7 +221,7 @@ describe("SSH activity watchdog (progress-based hang detection)", () => {
     // its workspace mtime never advances. No NEW distinct work. The fixed-point read over the
     // work signature must SURFACE a stall (it would otherwise run truly forever).
     const watchdog: ActivityWatchdog = {
-      livenessProbe: () => Promise.resolve("ws:1000"),
+      livenessProbe: () => Promise.resolve({ observed: true as const, signature: "ws:1000" }),
       probeIntervalMs: 1_000,
     };
 
@@ -227,7 +257,7 @@ describe("SSH activity watchdog (progress-based hang detection)", () => {
     const progressEvents: Array<{ outputBytesAdvanced: number; workspaceSignature?: string }> = [];
     // A probe whose workspace signature stays flat — the output stream alone advances each tick.
     const watchdog: ActivityWatchdog = {
-      livenessProbe: () => Promise.resolve("ws:1000"),
+      livenessProbe: () => Promise.resolve({ observed: true as const, signature: "ws:1000" }),
       probeIntervalMs: 1_000,
       onProgress: (signal) => {
         progressEvents.push({
@@ -269,7 +299,7 @@ describe("SSH activity watchdog (progress-based hang detection)", () => {
     // The first tick sets the signature (counts as advancement from undefined → defined),
     // every subsequent tick is signature-IDENTICAL → MUST NOT emit onProgress.
     const watchdog: ActivityWatchdog = {
-      livenessProbe: () => Promise.resolve("ws:1000"),
+      livenessProbe: () => Promise.resolve({ observed: true as const, signature: "ws:1000" }),
       probeIntervalMs: 1_000,
       onProgress: (signal) => {
         progressEvents.push({
@@ -295,7 +325,7 @@ describe("SSH activity watchdog (progress-based hang detection)", () => {
     const substrate = await makeSubstrate(c.client);
     let invocations = 0;
     const watchdog: ActivityWatchdog = {
-      livenessProbe: () => Promise.resolve("ws:1000"),
+      livenessProbe: () => Promise.resolve({ observed: true as const, signature: "ws:1000" }),
       probeIntervalMs: 1_000,
       onProgress: () => {
         invocations += 1;
@@ -332,7 +362,7 @@ describe("SSH activity watchdog (progress-based hang detection)", () => {
     // With minNonAdvancingRepeats=5 the substrate MUST tolerate this plateau (the Codex
     // silent-generation window), then continue when new output finally arrives.
     const watchdog: ActivityWatchdog = {
-      livenessProbe: () => Promise.resolve("ws:flat"),
+      livenessProbe: () => Promise.resolve({ observed: true as const, signature: "ws:flat" }),
       probeIntervalMs: 1_000,
       minNonAdvancingRepeats: 5,
     };
@@ -360,7 +390,7 @@ describe("SSH activity watchdog (progress-based hang detection)", () => {
     // still a STREAK ceiling on signature identity, not a green card: once the streak reaches
     // 5 identical-neighbor pairs the wedge fires and the substrate surfaces the stall.
     const watchdog: ActivityWatchdog = {
-      livenessProbe: () => Promise.resolve("ws:flat"),
+      livenessProbe: () => Promise.resolve({ observed: true as const, signature: "ws:flat" }),
       probeIntervalMs: 1_000,
       minNonAdvancingRepeats: 5,
     };
@@ -380,7 +410,8 @@ describe("SSH activity watchdog (progress-based hang detection)", () => {
     const c = createControllableClient();
     const substrate = await makeSubstrate(c.client);
     const watchdog: ActivityWatchdog = {
-      livenessProbe: () => Promise.resolve(),
+      // OBSERVED and flat - a genuine fixed point, not a blind probe.
+      livenessProbe: () => Promise.resolve({ observed: true as const, signature: "ws:flat" }),
       probeIntervalMs: 1_000,
       onQuiet: "kill",
     };
@@ -392,6 +423,7 @@ describe("SSH activity watchdog (progress-based hang detection)", () => {
     const result = await runPromise;
 
     expect(result.stalled).toBe(true);
+    expect(result.stallKind).toBe("no_progress");
     expect(result.failure?.kind).toBe("ssh_failed");
     expect(result.failure?.message).toContain("no sign of life");
     expect(c.state.destroyCount).toBe(1);

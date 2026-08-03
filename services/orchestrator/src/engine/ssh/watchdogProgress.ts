@@ -38,11 +38,14 @@ export const WORK_SIGNATURE_WINDOW = 8;
 
 // Fold the recent OUTPUT CONTENT and the remote WORKSPACE signature into one stable work-state
 // fingerprint. `outputContent` is the distinctRecentOutput summary of the output seen since the
-// prior snapshot; `workspaceSignature` is whatever the liveness probe reported (e.g. the newest
-// workspace mtime). An `undefined` workspace means the runner was UNREACHABLE this tick — we
-// fold a fixed sentinel so an unreachable runner with no NEW distinct output reads as a
-// NON-advancing signature (the dead/zombied case), while genuinely-new output alone still
-// advances the fingerprint.
+// prior snapshot; `workspaceSignature` is what the liveness probe OBSERVED (blocks/inodes
+// consumed, folded with a depth-bounded digest of the workspace's top levels).
+//
+// `undefined` here means the watchdog has NO probe attached at all (the output-only class) —
+// we fold a fixed sentinel so output alone decides. It does NOT mean "the probe could not
+// see the runner": that case never reaches this function, because an UNOBSERVABLE probe is
+// the absence of evidence rather than evidence of non-progress and is routed away from the
+// work-signature history entirely (F-10 — see MIN_UNOBSERVABLE_PROBE_REPEATS below).
 export function workSignature(outputContent: string, workspaceSignature: string | undefined): string {
   const hash = createHash("sha256");
   hash.update(outputContent);
@@ -129,6 +132,30 @@ export const MIN_NON_ADVANCING_NEIGHBOR_REPEATS_VCS = 2;
 // silent-generation; a 5-neighbor floor (75s) tolerates the burst-stream cycle with margin.
 // DO NOT tighten this back to 2 without new evidence — the Codex burst pattern has not changed.
 export const MIN_NON_ADVANCING_NEIGHBOR_REPEATS_AGENT = 5;
+
+// The MINIMUM run of CONSECUTIVE probe ticks that OBSERVED NOTHING AT ALL before the substrate
+// surfaces a distinguishable `probe_unobservable` stall (F-10). NOT an elapsed-time budget and
+// NOT a retry cap — it is a STREAK ceiling on OBSERVATION OUTCOMES, the same structural read as
+// the two floors above, over a different (and strictly weaker) kind of evidence.
+//
+// WHY THIS EXISTS AT ALL. The probe used to return `undefined` for BOTH "the workspace is
+// genuinely flat" and "I could not see the workspace", and the substrate folded both into the
+// same fixed sentinel. So two consecutive SLOW OR FAILED walks over a large tree reached the
+// vcs 2-neighbor floor and aborted a perfectly healthy step — infrastructure slowness wearing
+// the costume of a stalled agent. The fix separates the two: an OBSERVED flat workspace is
+// evidence of non-progress and feeds the streak above; an UNOBSERVABLE probe is NO evidence
+// either way and feeds nothing.
+//
+// WHY IT IS NOT ZERO (i.e. why "no evidence" is not simply ignored forever). If the probe were
+// permanently blind — a workspace deleted underneath the step, a runner that answers SSH
+// keepalive pings but can no longer exec — a genuinely wedged step would run forever with nothing
+// left watching it. So a LONG consecutive run of blind ticks is itself a reportable condition,
+// surfaced under its OWN kind so a caller can tell "the agent wedged" from "we lost sight of
+// the runner" and re-drive accordingly. It is deliberately WIDER than either progress floor:
+// absence of observation is weaker evidence than an observed fixed point, so it must take
+// strictly longer to escalate. Any genuinely-new output resets it (a talking step is alive
+// regardless of whether we can see its workspace).
+export const MIN_UNOBSERVABLE_PROBE_REPEATS = 6;
 
 // Is the exec WEDGED — its work signature at a FIXED POINT (non-advancing) across the trailing
 // checks? Given the work-signature history (oldest->newest, the latest snapshot included),
