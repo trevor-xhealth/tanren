@@ -89,7 +89,7 @@ export const specs = pgTable(
     status: text("status").notNull().default("open"),
     // DagWalker ready-set priority (P0…tbd). Literals mirror SpecPriority.
     priority: text("priority").notNull().default("tbd"),
-    // Writer prompt mode: from_scratch | specialize_seed (greenfield scaffold).
+    // Writer prompt mode: from_scratch | specialize_seed | modify_existing (see SpecMode).
     mode: text("mode").notNull().default("from_scratch"),
     // P3-0014 discovery provenance bag; `{}` is honest empty.
     metadata: jsonb("metadata")
@@ -118,7 +118,7 @@ export const specs = pgTable(
     uniqueIndex("specs_org_project_spec_unique").on(table.orgId, table.projectId, table.specId),
     enumCheck("specs_status_check", table.status, stateEnumLists.specs_status),
     enumCheck("specs_priority_check", table.priority, ["P0", "P1", "P2", "tbd"]),
-    enumCheck("specs_mode_check", table.mode, ["specialize_seed", "from_scratch"]),
+    enumCheck("specs_mode_check", table.mode, ["specialize_seed", "from_scratch", "modify_existing"]),
     index("specs_org_id").on(table.orgId),
     index("specs_project_created").on(table.projectId, table.createdAt, table.specId),
     uniqueIndex("specs_triage_provenance_unique")

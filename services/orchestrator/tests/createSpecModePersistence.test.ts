@@ -10,11 +10,19 @@
 // checker/auditor prompt-mode tests (the answerers branch on it too) — together
 // they prove the END-TO-END plumbing the v65 fix delivered: every foundation spec
 // is created with `mode='specialize_seed'` in the DB.
+//
+// The brownfield arm (`modify_existing`) gets the SAME round-trip proof at the bottom
+// of this file: `seedDagFromReconAndIssues` — the one path that creates specs for a
+// pre-existing repository — opts in explicitly, which is why `DEFAULT_SPEC_MODE` did
+// not have to move for the third mode to reach a real writer.
 
 import { describe, expect, it } from "vitest";
 import type { ActorContext } from "../src/auth/index.js";
 import { createSpec, type CreateSpecInput } from "../src/engine/workflow/projectSpec.js";
 import { scaffoldSpecsFor } from "../src/engine/forge/interview/deriveScaffoldSpecs.js";
+import { seedDagFromReconAndIssues } from "../src/engine/forge/brownfield/seed.js";
+import type { ReconReport } from "../src/engine/forge/brownfield/types.js";
+import type { IngestedItem } from "../src/engine/forge/inbox/types.js";
 import type { CaptureLifecycle } from "../src/engine/forge/interview/types.js";
 import type { SeededTemplate } from "../src/engine/templates/fragments/materialize.js";
 
@@ -167,5 +175,52 @@ describe("createSpec — `mode` ROUND-TRIP through INSERT INTO specs (audit find
       { title: "build", mode: "specialize_seed" },
       { title: "deploy", mode: "specialize_seed" },
     ]);
+  });
+});
+
+describe("seedDagFromReconAndIssues — brownfield seeds land at mode='modify_existing'", () => {
+  // The BROWNFIELD counterpart of the foundation-spec proof above, and the reason
+  // `DEFAULT_SPEC_MODE` did NOT have to move: brownfield-ness is a property of the
+  // CREATION path. Drive the REAL seed engine through the same capturing pool and
+  // assert every spec it creates — from a GitHub issue AND from a recon gap — arrives
+  // at the DB carrying `modify_existing` in positional $9. Without it these specs
+  // would ride the `from_scratch` default, whose standing writer instruction is
+  // "Build everything ELSE — the manifest/lockfile, sources, configs, tests,
+  // fixtures" — against the operator's real, pre-existing repository.
+  it("every spec seeded from a recon gap or a GitHub issue INSERTs `modify_existing` as param $9", async () => {
+    const pool = newPool();
+    const report: ReconReport = {
+      identity: { slug: "acme", purpose: "an existing production service", inferredFrom: "README.md" },
+      personas: [],
+      behaviors: [],
+      architecture: [],
+      risks: [],
+      gaps: [{ id: "gap_1", chapter: "architecture", question: "Which queue owns retries?", options: [] }],
+    };
+    const issues: IngestedItem[] = [
+      {
+        externalId: "acme/repo#42",
+        title: "Ingest endpoint drops bursts",
+        body: "Bursts above the configured rate are silently dropped.",
+        severity: "warn",
+        projectId: "project_v65",
+      },
+    ];
+    const result = await seedDagFromReconAndIssues(pool.asPgPool(), {
+      projectId: "project_v65",
+      orgId: "org_1",
+      report,
+      issues,
+      actor: ACTOR,
+    });
+
+    // One spec per source — the issue and the gap are distinct titles (no dedupe).
+    expect(result.fromIssues).toBe(1);
+    expect(result.fromGaps).toBe(1);
+    expect(pool.specInserts).toHaveLength(2);
+    // BOTH creation sites carry the brownfield mode; neither rides the default.
+    for (const insert of pool.specInserts) {
+      expect(insert.params[9]).toBe("modify_existing");
+    }
   });
 });

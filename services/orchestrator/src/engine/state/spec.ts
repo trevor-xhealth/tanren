@@ -19,9 +19,21 @@ export const DEFAULT_SPEC_PRIORITY: SpecPriority = "tbd";
  * The WRITER-PROMPT MODE for a spec (task #86 — v64 root cause). Selects which standing
  * instructions `writerPromptFor()` emits for this spec's writer iterations:
  *
- * - `from_scratch` (default — brownfield + non-scaffold specs): the workspace is the
- *   project's existing tree (or an empty repo). The writer scaffolds the manifest,
- *   sources, configs, tests, regenerates the lockfile after manifest edits, etc.
+ * - `from_scratch` (default — greenfield's non-scaffold specs): the workspace is an empty
+ *   or near-empty repo. The writer scaffolds the manifest, sources, configs, tests,
+ *   regenerates the lockfile after manifest edits, etc.
+ * - `modify_existing` (brownfield): the workspace is a PRE-EXISTING, AUTHORITATIVE
+ *   repository — written by other people, green today, with its own conventions. The
+ *   spec is a SCOPED AMENDMENT to it, never a rebuild of it. The writer is told to read
+ *   before writing, follow the repo's established patterns, make the smallest coherent
+ *   change, treat the existing tests as a contract, and leave high-blast-radius surfaces
+ *   (dependency manifests + lockfiles, build/lint/test config, CI definitions, ownership
+ *   policy, schema/migration history) alone UNLESS the spec explicitly requires them.
+ *   `from_scratch` was labelled "the brownfield path" but instructed the writer to "Build
+ *   everything ELSE — the manifest/lockfile, sources, configs, tests, fixtures", which
+ *   against a real 12k-file repository is an instruction to REBUILD it. This arm is the
+ *   fix; nothing opts into it by default except the brownfield onboarding seed path
+ *   (`engine/forge/brownfield/seed.ts`), so no existing project type changes behavior.
  * - `specialize_seed` (greenfield's scaffold spec, post-PR-G): the workspace's initial
  *   commit IS the composed VFS — manifest, lockfile, tsconfig, contract files, source
  *   skeleton are already in place AND proven green by composition. The writer
@@ -33,17 +45,21 @@ export const DEFAULT_SPEC_PRIORITY: SpecPriority = "tbd";
  *   ZERO merges — each iteration a different over-broad diff, so the fixed-point
  *   detector never fired).
  *
- * The DB CHECK in `db/src/schemaCore.ts` mirrors these literals; the column default is
- * `from_scratch` (backwards-compat — brownfield/legacy paths keep today's behavior).
+ * The DB CHECK in `db/src/schemaCore.ts` mirrors these literals (migration 0113 widened
+ * it for `modify_existing`); the column default is `from_scratch` and STAYS there —
+ * every non-default arm is opted into explicitly by the path that creates the spec.
  */
-export const SpecMode = z.enum(["specialize_seed", "from_scratch"]);
+export const SpecMode = z.enum(["specialize_seed", "from_scratch", "modify_existing"]);
 export type SpecMode = z.infer<typeof SpecMode>;
 
 /** The default spec mode (matches the DB column default): the from-scratch authoring
- * the writer guidance was originally written for. EVERY foundation spec (greenfield's
- * `scaffold` · `build` · `deploy`) opts INTO `specialize_seed` explicitly at
- * `scaffoldSpecsFor()` — each specializes a surface the composed seed already shipped
- * (justfile recipes, the toolchain) for THIS product. */
+ * the writer guidance was originally written for. UNCHANGED by the `modify_existing`
+ * arm — adding a third mode must not move any existing project type. EVERY foundation
+ * spec (greenfield's `scaffold` · `build` · `deploy`) opts INTO `specialize_seed`
+ * explicitly at `scaffoldSpecsFor()` — each specializes a surface the composed seed
+ * already shipped (justfile recipes, the toolchain) for THIS product. Brownfield
+ * onboarding opts INTO `modify_existing` explicitly at `seedDagFromReconAndIssues()` —
+ * a property of the brownfield CREATION path, deliberately not a global default flip. */
 export const DEFAULT_SPEC_MODE: SpecMode = "from_scratch";
 
 const SPEC_PRIORITY_RANK: Record<SpecPriority, number> = { P0: 0, P1: 1, P2: 2, tbd: 3 };

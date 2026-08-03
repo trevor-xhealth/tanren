@@ -325,9 +325,16 @@ async function loadDriveRunContext(deps: DriveConflictResolveDeps): Promise<Driv
   const immediateAncestorBranch = immediateAncestorBranchFromStack(row.ancestor_stack);
   // Task #86: read the spec's writer-prompt MODE off the joined `s.mode` column. The DB
   // CHECK is NOT NULL with default `from_scratch`, so a real row always carries one of the
-  // two literals; a fixture row without the column safely defaults to `from_scratch`. A
+  // enum literals; a fixture row without the column safely defaults to `from_scratch`. A
   // narrow literal compare avoids a runtime zod import (the file's max-dependencies cap).
-  const specMode: SpecMode = row.mode === "specialize_seed" ? "specialize_seed" : "from_scratch";
+  //
+  // EVERY non-default `SpecMode` literal MUST be listed here. An unlisted one does not
+  // fail — it silently DEGRADES to `from_scratch`, which for a brownfield
+  // (`modify_existing`) spec means the re-gate's checker + auditor would judge a scoped
+  // amendment with the greenfield "build everything" bar. Pinned by
+  // `tests/specModeModifyExisting.test.ts`.
+  const specMode: SpecMode =
+    row.mode === "specialize_seed" || row.mode === "modify_existing" ? row.mode : "from_scratch";
   return {
     repoUrl: row.repo_url,
     baseBranch:
