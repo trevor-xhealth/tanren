@@ -276,7 +276,6 @@ services:
       # compose secret), not an env value — same as the orchestrator above; the
       # worker seeds the same runner identity.
       TANREN_RUNNER_IDENTITY_KEY_PATH: /run/secrets/tanren_runner_identity_key
-      TANREN_RUN_WORKER_CONCURRENCY: ${TANREN_RUN_WORKER_CONCURRENCY:-2}
       # Same sidecar allocator the orchestrator uses (ephemeral runners on demand).
       TANREN_ALLOCATOR_URL: http://allocator:3200
       # Allocator bearer token via the mounted secret FILE (not an env value) — same

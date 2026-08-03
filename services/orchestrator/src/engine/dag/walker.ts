@@ -31,7 +31,7 @@ import type { RunStateWriter } from "../contracts/runStateWriter.js";
 import { SpecDependenciesBlockedError, SpecNotRunnableError } from "../workflow/projectSpecErrors.js";
 import type { SpecReadiness } from "./speculation.js";
 import { pauseDagOnBudget } from "./budgetPause.js";
-import { buildSpeculationConfigResolver } from "./speculationConfigResolver.js";
+import { buildConcurrencyResolver, buildSpeculationConfigResolver } from "./walkerConfigResolvers.js";
 import { ancestorLifecycleKey, HeldReDriveBackoff } from "./heldReDriveBackoff.js";
 import {
   budgetMilestoneEvents,
@@ -57,8 +57,12 @@ import {
 import { createLogger } from "../observability/logger.js";
 const log = createLogger("dag-walker");
 
-/** Resolve the governed concurrency ceiling — the config knob, never an env var. */
-export type ConcurrencyResolver = () => number;
+/**
+ * Resolve the governed concurrency ceiling FOR A PROJECT — the config knob
+ * (project-over-org-over-default), never an env var. Async so the production
+ * resolver can read the persisted config; a test may return the number directly.
+ */
+export type ConcurrencyResolver = (projectId: string) => number | Promise<number>;
 
 /** The per-project speculation config (autonomy-engine.md §2c): threshold + depth cap. */
 export interface SpeculationConfig {
@@ -94,11 +98,11 @@ export interface DagWalkerDeps {
   /** in-9/in-10 capability_prepare phase, run once per active-project walk before spec planning (optional). */
   integrationPhase?: IntegrationPhase;
   /**
-   * The governed concurrency ceiling (autonomy-engine.md §1.4): defaults to the
-   * config surface's `AllocatorConfig.concurrency` (the SAME ceiling the worker
-   * boots with). Never read from `process.env`. A seam so a future per-project/org
-   * resolver (and the live rate-limit/budget throttle) slots in without touching
-   * the walk loop.
+   * The governed concurrency ceiling (autonomy-engine.md §1.4): the walked project's
+   * persisted `allocator.concurrency` over its org's over the schema default —
+   * `buildConcurrencyResolver`, which `buildDagWalker` wires. Never read from
+   * `process.env`. Omitted (unit tests / an injected-deps walker) it falls back to the
+   * config-surface default, the SAME ceiling the process-wide worker boots with.
    */
   concurrency?: ConcurrencyResolver;
   /**
@@ -126,7 +130,7 @@ export class EventEmittingDagWalker implements DagWalker {
   private readonly ancestorWaitBackoff: HeldReDriveBackoff;
 
   constructor(private readonly deps: DagWalkerDeps) {
-    this.concurrency = deps.concurrency ?? resolveWorkerConcurrency;
+    this.concurrency = deps.concurrency ?? (() => resolveWorkerConcurrency());
     this.ancestorWaitBackoff = deps.ancestorWaitBackoff ?? new HeldReDriveBackoff();
   }
 
@@ -159,7 +163,7 @@ export class EventEmittingDagWalker implements DagWalker {
     // report every otherwise-eligible spec the money gate stopped. The former
     // path returned before planning and therefore hard-coded readyHeldBack=0,
     // even with ready roots in the loaded snapshot.
-    const ceiling = this.concurrency();
+    const ceiling = await this.concurrency(projectId);
     const plan = planSpeculativeDagTick(snapshot, lifecycle, {
       concurrencyCeiling: ceiling,
       threshold: config.threshold,
@@ -404,8 +408,9 @@ export interface BuildDagWalkerDeps {
  * Build the production DagWalker from a runtime pool — the single construction site
  * the worker boot + subscriber use. Wires the pg read model + lifecycle projection, the
  * createQueuedRunFromSpec enqueuer, the org-scoped ancestor-stack resolver, the pg event
- * emitter, and the per-project speculation-config resolver; the concurrency ceiling
- * defaults to the config surface (resolveWorkerConcurrency). When a `runStateWriter` is
+ * emitter, and the per-project speculation-config + concurrency-ceiling resolvers (the
+ * ceiling is the project's persisted `allocator.concurrency` over its org's over the
+ * schema default — `buildConcurrencyResolver`). When a `runStateWriter` is
  * supplied (plane-split remote-writes), the enqueuer + event emitter route their tenant
  * writes through the control plane instead.
  */
@@ -420,6 +425,9 @@ export function buildDagWalker(pool: pg.Pool, deps: BuildDagWalkerDeps): DagWalk
     events,
     ancestorStackResolver: new PgDagAncestorStackResolver(pool),
     speculationConfig: buildSpeculationConfigResolver(pool, events),
+    // The GOVERNED ceiling, resolved from the walked project's persisted
+    // `allocator.concurrency` over its org's over the schema default.
+    concurrency: buildConcurrencyResolver(pool),
     budgetGate: new PgBudgetGate(pool),
     // in-9/in-10: the capability_prepare integration phase (constructed by the
     // subscriber so this module never imports the concrete integrations driver).
@@ -439,7 +447,7 @@ export async function listWalkableProjectIds(pool: pg.Pool): Promise<string[]> {
 }
 
 // Re-exported so existing import sites (and the conformance/tests) keep pulling the pg seam
-// wirings + classifier + the (line-cap-split) speculation-config resolver from `walker.ts`.
+// wirings + classifier + the (line-cap-split) per-project config resolvers from `walker.ts`.
 export { classifySpecStatus, PgDagReadModel, SpecRunDagEnqueuer, PgDagEventEmitter } from "./walkerPg.js";
-export { buildSpeculationConfigResolver } from "./speculationConfigResolver.js";
+export { buildConcurrencyResolver, buildSpeculationConfigResolver } from "./walkerConfigResolvers.js";
 export type { DagEventEmitter };

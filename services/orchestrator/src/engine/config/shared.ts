@@ -114,19 +114,32 @@ export type AllocatorConfig = z.infer<typeof AllocatorConfig>;
 export const CANONICAL_RUNNER_IMAGE: string = AllocatorConfig.parse({}).runnerImage;
 
 /**
- * The worker's max in-flight run-slot ceiling, resolved from the config surface
+ * The `allocator.concurrency` a caller resolved from each governed config layer.
+ * `undefined` means that layer configures none (a project that never set the knob,
+ * or a layer the caller has no row for) — NOT "zero slots".
+ */
+export interface WorkerConcurrencyLayers {
+  /** The PROJECT's `allocator.concurrency` (`PartialAllocatorConfig` — optional). */
+  project?: number | undefined;
+  /** The ORG's `allocator.concurrency` (the org-level default every project inherits). */
+  org?: number | undefined;
+}
+
+/**
+ * The max in-flight run-slot ceiling, resolved from the config surface
  * (`AllocatorConfig.concurrency`) — NOT from an env var (autonomy-engine.md
  * §1.4: "concurrency is a governed config knob, never an env var").
  *
- * This is the process-global default ceiling the run-executor worker boots with.
- * It is derived by parsing an `AllocatorConfig` (so the single schema default —
- * and any future config source feeding that schema — is the one source of
- * truth), never read from `process.env`. The future DagWalker reads the same
- * per-project/org `AllocatorConfig.concurrency` and throttles BELOW this ceiling
- * in response to live rate-limit/budget signals.
+ * Precedence is PROJECT over ORG over the schema default — the same layering
+ * `resolveEffectiveBudget` / `resolveCreditUsdRate` apply to the other governed
+ * knobs. Called with NO layers it yields the schema default, which is the
+ * process-wide ceiling the run-executor worker boots with: that worker serves
+ * every tenant in the process, so no single project's knob may set it. The
+ * per-project ceiling is resolved (and spent) by the DagWalker, which knows the
+ * project it is walking — see `buildConcurrencyResolver` in `dag/walkerConfigResolvers.ts`.
  */
-export function resolveWorkerConcurrency(): number {
-  return AllocatorConfig.parse({}).concurrency;
+export function resolveWorkerConcurrency(layers: WorkerConcurrencyLayers = {}): number {
+  return layers.project ?? layers.org ?? AllocatorConfig.parse({}).concurrency;
 }
 
 /** The reaper's retention + sweep cadence, resolved from the same governed config surface. */

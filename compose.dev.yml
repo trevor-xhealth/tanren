@@ -86,7 +86,6 @@ services:
       # runs in-process. Keep this literal empty value so a host/.env
       # TANREN_RUN_WORKER=1 cannot create duplicate run/merge loops.
       TANREN_RUN_WORKER: ""
-      TANREN_RUN_WORKER_CONCURRENCY: ${TANREN_RUN_WORKER_CONCURRENCY:-2}
       # Dev profile: orchestrator routes /hello/run to the long-lived static
       # `runner` service over the compose network. The allocator sidecar is
       # still up for parity with prod (and to service ephemeral runs), but
@@ -185,8 +184,6 @@ services:
       # compose secret, wired below), never a plaintext env value — same as the
       # orchestrator above; the worker seeds the same runner identity.
       TANREN_RUNNER_IDENTITY_KEY_PATH: /run/secrets/tanren_runner_identity_key
-      # Bounds in-flight runs (same knob the in-process worker honored).
-      TANREN_RUN_WORKER_CONCURRENCY: ${TANREN_RUN_WORKER_CONCURRENCY:-2}
       # Same allocator + static-runner reach the orchestrator's worker path had.
       TANREN_ALLOCATOR_KIND: static
       TANREN_RUNNER_SSH_HOST: runner
