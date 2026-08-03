@@ -14,6 +14,7 @@ import type pg from "pg";
 import type { ActorContext } from "../../../auth/schemas.js";
 import type { IngestedItem } from "../inbox/types.js";
 import { createSpec } from "../../workflow/projectSpec.js";
+import type { SpecMode } from "../../state/spec.js";
 import type { ReconGap, ReconReport } from "./types.js";
 
 export type SeedSource = "github_issue" | "agent_gap";
@@ -42,6 +43,18 @@ export interface SeedDagResult {
   fromIssues: number;
   fromGaps: number;
 }
+
+// EVERY spec seeded by brownfield onboarding authors against a PRE-EXISTING,
+// AUTHORITATIVE repository — the recon report and the GitHub issues are both about a
+// tree somebody else already built and that is green today. So the seed path opts INTO
+// `modify_existing` explicitly, here, rather than by flipping `DEFAULT_SPEC_MODE`: the
+// default stays `from_scratch` so no existing project type moves, and brownfield-ness
+// is a property of the CREATION path (mirroring how `scaffoldSpecsFor()` opts the
+// greenfield foundation specs into `specialize_seed`). Without this, a brownfield spec
+// would carry the default `from_scratch` mode whose standing writer instruction is
+// "Build everything ELSE — the manifest/lockfile, sources, configs, tests, fixtures" —
+// against a real repository, an instruction to rebuild it instead of amend it.
+const BROWNFIELD_SEED_SPEC_MODE: SpecMode = "modify_existing";
 
 function normalizeTitle(title: string): string {
   return title
@@ -82,6 +95,7 @@ export async function seedDagFromReconAndIssues(pool: pg.Pool, input: SeedDagInp
         title: issue.title,
         description: issue.body === "" ? `Seeded from GitHub issue ${issue.externalId}.` : issue.body,
         acceptanceCriteria: [`given ${issue.externalId}, when addressed, then the issue is resolved`],
+        mode: BROWNFIELD_SEED_SPEC_MODE,
       },
       input.actor,
     );
@@ -109,6 +123,7 @@ export async function seedDagFromReconAndIssues(pool: pg.Pool, input: SeedDagInp
         title,
         description: `Recon gap (${gap.chapter}): ${gap.question}`,
         acceptanceCriteria: [`given the recon gap "${gap.id}", when resolved, then the chapter is complete`],
+        mode: BROWNFIELD_SEED_SPEC_MODE,
       },
       input.actor,
     );

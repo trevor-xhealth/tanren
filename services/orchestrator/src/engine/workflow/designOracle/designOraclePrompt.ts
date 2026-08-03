@@ -134,7 +134,17 @@ function renderDimension(dimension: ResolvedDimension): string {
 // spec wasn't tasked with adding) — only design-contract gaps in the PRODUCT-SPECIFIC
 // surfaces this spec was supposed to deliver. EMPTY for `from_scratch` (the default)
 // so brownfield/legacy specs see a byte-identical legacy oracle prompt.
-function seededModeBlock(specMode: SpecMode | undefined): string[] {
+//
+// THIRD ARM — `modify_existing` (brownfield). Same false-finding class against a
+// pre-existing REPOSITORY: a mode-blind oracle cites design-contract gaps that are
+// properties of code the writer was forbidden to touch, and the only way to clear them
+// is the over-broad rebuild the mode exists to prevent. Leaving one of the four
+// mode-aware prompts blind is exactly the gap PR #708 had to close for the checker +
+// auditor one release after PR #704 fixed the writer, so the arm lands with the others.
+function specModeScopeBlock(specMode: SpecMode | undefined): string[] {
+  if (specMode === "modify_existing") {
+    return modifyExistingModeBlock;
+  }
   if (specMode !== "specialize_seed") {
     return [];
   }
@@ -158,6 +168,29 @@ function seededModeBlock(specMode: SpecMode | undefined): string[] {
     "normally — those are loud structural gaps the seed cannot have shipped.",
   ];
 }
+
+// The `modify_existing` tail block for the designOracle prompt. Mirrors the writer's
+// `WRITER_MODIFY_EXISTING_GRADING_INSTRUCTION` + the checker/auditor block so all four
+// answerers agree on what is in-scope for a scoped amendment to a pre-existing
+// repository: design-contract gaps that are properties of the PRE-EXISTING code are not
+// this spec's job, only the surfaces this spec was asked to deliver are judged, and
+// re-elaboration gaps still surface normally (they are loud structural gaps the
+// pre-existing repository cannot have covered).
+const modifyExistingModeBlock: string[] = [
+  "",
+  "MODIFY-EXISTING mode: this spec's repository is PRE-EXISTING and AUTHORITATIVE. Other",
+  "people built it, it is green today, and the writer's job was a SCOPED AMENDMENT to it —",
+  "not a rebuild of it. Do NOT cite design-contract gaps that are properties of the",
+  "PRE-EXISTING code (a persona journey the repository never covered, a behavior its",
+  "existing surfaces don't yet serve) — the writer was explicitly forbidden to widen the",
+  "diff onto them, so such a finding can only be cleared by the over-broad rebuild this",
+  "mode prevents. Only cite design-contract gaps in the surfaces THIS spec was supposed to",
+  'deliver (the acceptance criteria name them). A finding like "behavior X has no covering',
+  'surface" against a pre-existing part of the repository is a FALSE finding in this mode.',
+  "Re-elaboration gaps (behaviors added to the project AFTER the design phase) are still",
+  "surfaced normally — those are loud structural gaps the pre-existing repository cannot",
+  "have covered.",
+];
 
 // The canonical self-inspection block — the writer's change is committed on the
 // current branch of the read-only workspace; the oracle inspects it itself (no diff
@@ -243,6 +276,6 @@ export function buildDesignOraclePrompt(input: DesignOraclePromptInput): string 
     // so the agent reads "this spec is specialize_seed; pre-existing seed surfaces are
     // NOT findings" LAST. Mirrors the checker/auditor's last-position-strongest-signal
     // placement (PR #708) — defensive on a re-iteration. EMPTY for `from_scratch`.
-    ...seededModeBlock(input.specMode),
+    ...specModeScopeBlock(input.specMode),
   ].join("\n");
 }

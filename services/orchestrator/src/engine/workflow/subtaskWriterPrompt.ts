@@ -5,7 +5,7 @@
 //
 // MODE-AWARE (task #86 — v64 root cause). The standing GRADING instruction differs by spec
 // mode: `from_scratch` keeps today's "build everything ELSE — manifest/lockfile, sources,
-// configs, tests, fixtures" guidance (the brownfield/legacy authoring path); the greenfield
+// configs, tests, fixtures" guidance (greenfield authoring on a blank page); the greenfield
 // SCAFFOLD spec runs in `specialize_seed` mode, where the workspace's initial commit IS the
 // composed VFS — manifest, lockfile, tsconfig, contract files, source skeleton are ALREADY in
 // place AND proven green by composition — so the writer is told to touch ONLY product-identity
@@ -16,6 +16,16 @@
 // writer kept doing what the standing instructions said, checker kept catching the scope
 // drift, but each iteration was a DIFFERENT over-broad diff so the fixed-point detector never
 // fired. See `services/orchestrator/src/engine/state/spec.ts` for the `SpecMode` enum.
+//
+// THIRD MODE — `modify_existing` (brownfield). `from_scratch` was LABELLED the brownfield
+// path but its standing instruction is "Build everything ELSE — the manifest/lockfile,
+// sources, configs, tests, fixtures". Pointed at an empty repo that is authoring guidance;
+// pointed at a pre-existing 12k-file monorepo it is an instruction to REBUILD the repository
+// instead of amending it — the same class of writer/checker non-convergence as v64, one
+// domain over. `modify_existing` frames the repository as pre-existing + authoritative and
+// the spec as a scoped amendment: read before writing, follow the repo's own patterns, make
+// the smallest coherent change, treat the existing tests as a contract, and leave the
+// SPEC_GATED_REPO_SURFACES alone unless the spec explicitly asks for them.
 import type { PlanSubtask } from "../answerers/schemas/index.js";
 import { DEFAULT_SPEC_MODE, type SpecMode } from "../state/spec.js";
 import type { SubtaskLoopInput } from "./subtaskLoop.js";
@@ -38,6 +48,26 @@ const WRITER_TOOLCHAIN_INSTRUCTION =
 // the stack — JS/TS, Rust, Python, a translation project), not a stack assumption. Listed
 // once here so the writer guidance + the contract-violation rework steering name the same set.
 export const IMMUTABLE_CONTRACT_FILES = ["justfile", ".tanren/ci.yml"] as const;
+
+// The SPEC-GATED repo surfaces for `modify_existing` mode. DELIBERATELY NOT a second
+// immutability list: against a real pre-existing repository a blanket ban would make
+// legitimate specs ("add dependency X", "bump the CI runner", "add a migration")
+// structurally impossible, and an impossible instruction is what produced the v40
+// oscillation (violate → revert-everything → violate). So the boundary is CONDITIONAL,
+// with the spec itself as the gate: touch these ONLY when the spec's description or
+// acceptance criteria explicitly require it, otherwise leave them byte-for-byte
+// unchanged. That keeps `IMMUTABLE_CONTRACT_FILES` (Tanren's OWN two contract files) as
+// the only ABSOLUTE ban in every mode, and makes the softer, wider boundary explicit +
+// testable rather than implicit in prose. Named as stack-agnostic CATEGORIES, not paths
+// — a brownfield repo may be JS/TS, Rust, Python or a translation project, and naming
+// `pnpm-lock.yaml` here would bake a stack assumption into a stack-general prompt.
+export const SPEC_GATED_REPO_SURFACES = [
+  "dependency manifests and their generated lockfiles",
+  "build, lint, format, typecheck and test configuration",
+  "CI and release-pipeline definitions",
+  "ownership, licensing and contribution-policy files",
+  "database schema and migration history",
+] as const;
 
 // A standing instruction prepended to every writer prompt: the project's declared contract
 // files are FIXED — the writer SCAFFOLDS the project (manifest, sources, configs, tests,
@@ -72,6 +102,25 @@ const WRITER_CONTRACT_INSTRUCTION_SPECIALIZE_SEED =
   "native gate definition). The seed already includes them in their proven-green composed " +
   "shape; specialization NEVER modifies them. Treat any change to a contract file as a " +
   "build-breaking error.";
+
+// The `modify_existing`-mode variant of the contract instruction. The two contract files
+// stay ABSOLUTELY immutable (the v40 rule, unchanged in every mode); on top of that, the
+// whole repository is framed as pre-existing + authoritative, and the SPEC-GATED surfaces
+// are named as a conditional boundary the spec itself unlocks. This is the arm that
+// replaces the `from_scratch` "Build everything ELSE — the manifest/lockfile, sources,
+// configs, tests, fixtures" framing, which against a real repository reads as an
+// instruction to REBUILD it.
+const WRITER_CONTRACT_INSTRUCTION_MODIFY_EXISTING =
+  "The project's DECLARED CONTRACT files are FIXED — you must NOT create, edit, delete, or " +
+  `move them: ${IMMUTABLE_CONTRACT_FILES.join(", ")} (the project's lifecycle recipes + its ` +
+  "native gate definition). They are the contract your work SATISFIES, not changes. Beyond " +
+  "them, this repository ALREADY EXISTS and is AUTHORITATIVE: other people built it, it is " +
+  "green today, and your change is a SCOPED AMENDMENT to it — never a rebuild of it. These " +
+  "surfaces are SPEC-GATED: touch them ONLY when this spec's description or acceptance " +
+  `criteria explicitly require it — ${SPEC_GATED_REPO_SURFACES.join("; ")}. When the spec ` +
+  "does not name them, leave them byte-for-byte unchanged; when it does, change the minimum " +
+  "that satisfies it. Everything else in the tree that your change does not need is " +
+  "off-limits: do not reformat it, do not rename it, do not clean it up.";
 
 // How the writer's change will be GRADED (spec-loop redesign §WRITER, workstream 1).
 // Steers the writer to satisfy the gate on the first pass: run the fast deterministic
@@ -149,6 +198,45 @@ const WRITER_SPECIALIZE_SEED_GRADING_INSTRUCTION =
   "criterion without scope drift onto seed-owned surfaces, and an AUDITOR reviews " +
   "quality/security/perf (write correct, secure, clean code).";
 
+// The `modify_existing`-mode grading instruction. The workspace is a pre-existing,
+// authoritative repository; the writer's job is a SCOPED AMENDMENT to it. Four rules,
+// each the inverse of a way the `from_scratch` instruction misfires against a real repo:
+// (1) READ BEFORE YOU WRITE — locate the existing pattern for the thing being changed and
+// follow it, because the repo's conventions outrank the writer's preferences; (2) the
+// SMALLEST COHERENT CHANGE — no adjacent refactors, no reformatting untouched files, no
+// dependency upgrades, no regenerating lockfiles/manifests the spec did not make stale
+// (the `from_scratch` "RECONCILE generated companions / after editing a package manifest
+// run the install step" rules are dropped, because here a manifest edit is itself the
+// exception, not the norm); (3) EXISTING TESTS ARE A CONTRACT — a test that fails because
+// of this change is a defect in the change, never a test to delete/skip/relax, and new
+// behavior needs new tests in the repo's OWN test idiom; (4) SCOPE IS GRADED — the
+// checker + auditor reject an over-broad diff, so widening the diff to make a failure go
+// away is a rejection, not a fix. Stack-agnostic: framed in terms of the project's
+// DECLARED lifecycle commands, never a specific tool or package manager.
+const WRITER_MODIFY_EXISTING_GRADING_INSTRUCTION =
+  "How your change will be graded — this spec runs in MODIFY-EXISTING mode: the workspace is " +
+  "a PRE-EXISTING, AUTHORITATIVE repository, not a blank page. READ BEFORE YOU WRITE: find " +
+  "the code that already does the nearest thing to what this spec asks and follow ITS " +
+  "pattern — the repository's established conventions, idioms, directory structure, naming, " +
+  "error handling and dependency choices OUTRANK your own preferences, including where you " +
+  "would have chosen differently. Make the SMALLEST COHERENT CHANGE that satisfies the spec: " +
+  "do not refactor adjacent code, do not reformat files you did not otherwise have to touch, " +
+  "do not add or upgrade dependencies, and do not regenerate lockfiles, manifests or other " +
+  "generated companions unless the spec explicitly required the change that made them stale. " +
+  "The EXISTING TESTS ARE A CONTRACT: every one of them must still pass, and a test that " +
+  "fails because your change altered behavior is a defect in YOUR change — never a test to " +
+  "delete, skip, weaken, or rewrite to match. New behavior needs NEW tests, written in the " +
+  "repository's existing test idiom and placed where that repository already puts its tests " +
+  "— never a new framework, a new runner, or a parallel test tree. A FAST deterministic gate " +
+  "(formatting, lint, typecheck) runs first — RUN it yourself before you stop, since a " +
+  "fast-gate failure loops straight back to you. A FORMATTING failure is mechanical: run the " +
+  "project's declared format-WRITE step over ONLY the files you touched, then re-run the " +
+  "check. If a lifecycle command fails, fix YOUR change; never widen the diff to make the " +
+  "failure go away. Then a CHECKER judges whether your change COMPLETES the subtask intent + " +
+  "every relevant acceptance criterion, and an AUDITOR reviews quality/security/perf — and " +
+  "BOTH also judge SCOPE: a diff that rebuilds, reformats, or re-derives what the repository " +
+  "already had is a rejection, not a bonus.";
+
 // Does a rejection reason indicate the writer EDITED an immutable contract file? Detected by
 // the contract-file PATH appearing in the reason (the checker/auditor/gate name the offending
 // file) — stack-agnostic, since the path set is the project's declared contract surface, not a
@@ -178,15 +266,28 @@ export function contractViolationSteering(reason: string): string[] {
 }
 
 // Pick the standing instruction set the writer prompt assembles for this spec, by mode.
-// `from_scratch` (default) → today's brownfield/legacy guidance (build manifest, sources,
+// `from_scratch` (default) → today's blank-page authoring guidance (build manifest, sources,
 // configs, tests, regenerate lockfile companions, etc). `specialize_seed` → the
 // seeded-mode guidance (composed seed is in place + proven green; touch ONLY
-// product-identity surfaces; no manifest/lockfile/config/test churn).
+// product-identity surfaces; no manifest/lockfile/config/test churn). `modify_existing`
+// → the brownfield guidance (the repository is pre-existing + authoritative; smallest
+// coherent change; existing tests are a contract; spec-gated repo surfaces).
+//
+// ADDITIVE BY CONSTRUCTION: the `modify_existing` arm is a new early return, so the two
+// pre-existing arms return the SAME two constants they returned before it landed and every
+// greenfield/legacy prompt stays byte-identical. `tests/specModeModifyExisting.test.ts`
+// asserts that property directly rather than leaving it to inspection.
 function standingInstructionsFor(mode: SpecMode): { contract: string; grading: string } {
   if (mode === "specialize_seed") {
     return {
       contract: WRITER_CONTRACT_INSTRUCTION_SPECIALIZE_SEED,
       grading: WRITER_SPECIALIZE_SEED_GRADING_INSTRUCTION,
+    };
+  }
+  if (mode === "modify_existing") {
+    return {
+      contract: WRITER_CONTRACT_INSTRUCTION_MODIFY_EXISTING,
+      grading: WRITER_MODIFY_EXISTING_GRADING_INSTRUCTION,
     };
   }
   return { contract: WRITER_CONTRACT_INSTRUCTION, grading: WRITER_GRADING_INSTRUCTION };

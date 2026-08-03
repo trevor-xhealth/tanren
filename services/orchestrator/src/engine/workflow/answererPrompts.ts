@@ -39,7 +39,9 @@
 // (manifest, lockfile, tsconfig, lint/test/build configs, contract files, source
 // skeleton, demo) are NOT findings — only gaps in the product-specific surfaces this
 // spec was supposed to deliver. `from_scratch` (the default) keeps today's prompt
-// byte-identical so brownfield/legacy specs are unchanged.
+// byte-identical so greenfield/legacy specs are unchanged. `modify_existing`
+// (brownfield) emits its own tail block: pre-existing REPOSITORY surfaces are not
+// findings, and SCOPE DRIFT is — see `specModeScopeBlock` below.
 
 import { renderRiskPostureLines } from "../oracle/index.js";
 import type { EntityRiskSignal } from "../oracle/index.js";
@@ -187,7 +189,19 @@ function riskSteerBlock(riskSignal: EntityRiskSignal | undefined): string[] {
 // source skeleton, demo) as completeness/quality findings — only gaps in the
 // product-specific surfaces this spec was supposed to deliver. EMPTY for
 // `from_scratch` (the default) so brownfield/legacy specs see a byte-identical prompt.
-function seededModeBlock(specMode: SpecMode | undefined): string[] {
+//
+// THIRD ARM — `modify_existing` (brownfield). Same failure class one domain over: a
+// mode-blind checker judging a scoped amendment to a pre-existing repository emits
+// "the project has no integration tests" / "the lint config is weak" against surfaces
+// the writer was explicitly forbidden to touch, and the only way the writer can clear
+// those findings is the over-broad rebuild the mode exists to prevent. So the block
+// scopes the answerer off pre-existing repo surfaces AND adds the inverse duty the
+// other two modes don't need: police SCOPE DRIFT, because in this mode an over-broad
+// diff is itself the defect.
+function specModeScopeBlock(specMode: SpecMode | undefined): string[] {
+  if (specMode === "modify_existing") {
+    return modifyExistingModeBlock;
+  }
   if (specMode !== "specialize_seed") {
     return [];
   }
@@ -209,6 +223,33 @@ function seededModeBlock(specMode: SpecMode | undefined): string[] {
     "editing configs in this mode.",
   ];
 }
+
+// The `modify_existing` tail block for the checker/auditor prompts. Mirrors the writer's
+// `WRITER_MODIFY_EXISTING_GRADING_INSTRUCTION` so all the answerers agree on what is
+// in-scope for a scoped amendment to a pre-existing repository. Two duties: (a) do NOT
+// cite pre-existing repo surfaces as findings — they are not this spec's job and the
+// repository was green before the writer started; (b) DO cite scope drift — in this mode
+// an over-broad diff (adjacent refactors, reformatted untouched files, regenerated
+// manifests/lockfiles the spec never asked for) is itself the defect, so the answerers
+// are the enforcement the writer instruction alone cannot provide.
+const modifyExistingModeBlock: string[] = [
+  "",
+  "MODIFY-EXISTING mode: this spec's repository is PRE-EXISTING and AUTHORITATIVE. Other",
+  "people built it, it is green today, and the writer's job was a SCOPED AMENDMENT to it —",
+  "not a rebuild of it. Everything the writer did not touch was already there and already",
+  "passing. Do NOT cite PRE-EXISTING repository surfaces — its dependency manifests and",
+  "lockfiles, build/lint/format/test configuration, CI definitions, directory layout,",
+  "existing tests, or established code style — as a completeness or quality finding: they",
+  "are not this spec's job, and a finding against one of them can only be cleared by the",
+  "over-broad rebuild this mode exists to prevent. Emit findings ONLY for (a) gaps in what",
+  "this spec's acceptance criteria asked the change to deliver, (b) new behavior shipped",
+  "without a new test in the repository's OWN existing test idiom, or an existing test",
+  "deleted/skipped/weakened instead of satisfied, and (c) SCOPE DRIFT — the diff touching",
+  "files the spec never asked for, refactoring adjacent code, reformatting untouched code,",
+  "or regenerating manifests/lockfiles the spec did not require. In this mode an over-broad",
+  'diff IS a defect: report it. A finding like "the project has no integration tests" or',
+  '"the lint config is weak" against a pre-existing surface is a FALSE finding.',
+];
 
 // Render the acceptance-criteria block under `header`. When the criteria list is EMPTY,
 // emit an explicit "(none ...)" guard line instead of a dangling header followed by
@@ -269,7 +310,7 @@ export function buildCheckerPrompt(input: CheckerPromptInput): string {
     // so the agent reads "this spec is specialize_seed; pre-existing seed surfaces are
     // NOT findings" LAST — the position writer/checker prompts treat as the strongest
     // signal on a re-iteration. EMPTY for `from_scratch` (the legacy byte-shape).
-    ...seededModeBlock(input.specMode),
+    ...specModeScopeBlock(input.specMode),
     "",
     ...input.outputInstructions,
   ].join("\n");
@@ -329,7 +370,7 @@ export function buildAuditorPrompt(input: AuditorPromptInput): string {
     // SEEDED-MODE tail block (task #86). Placed AFTER the spec/criteria/subtasks/check
     // block — same defensive last-position placement as the checker. EMPTY for
     // `from_scratch` (the legacy byte-shape).
-    ...seededModeBlock(input.specMode),
+    ...specModeScopeBlock(input.specMode),
     "",
     ...input.outputInstructions,
   ].join("\n");
