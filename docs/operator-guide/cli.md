@@ -92,6 +92,32 @@ Personas without `--project-id` are org-scoped and visible to every project in
 the org; personas under `--project-id` are project-scoped (P2A-0018 visibility
 rule).
 
+## Behavior catalogs (`tanren.behavior.v0` / `tanren.persona.v0`)
+
+Import an existing Markdown catalog natively instead of rewriting it into
+Given/When/Then. See `docs/architecture/behavior-catalog-import.md` for the
+modelling decisions.
+
+```sh
+tanren catalog import --org-id <orgId> --project-id <projectId> \
+                      --dir <dir> [--dir <dir2>] [--dry-run]
+tanren catalog list   --org-id <orgId> --project-id <projectId>
+tanren catalog get    --org-id <orgId> --project-id <projectId> --catalog-id B-0206
+```
+
+`--dir` is repeatable: pass the behaviors _and_ personas directories in one
+invocation so the whole catalog lands in a single transaction (a behavior whose
+persona slug is not resolvable fails the import loudly rather than being dropped).
+`--dry-run` parses, validates and resolves everything server-side, prints the
+summary, and commits nothing.
+
+Markdown files with no frontmatter (a directory's `README.md` / `SCHEMA.md`) are
+skipped and listed under `skipped` in the output. A file that declares an
+unrecognized `schema:` is an error, not a skip.
+
+Re-importing an unchanged catalog is idempotent — the stable `B-####` id is the
+natural key, and the summary reports `created` / `updated` / `unchanged`.
+
 ## Credentials
 
 Credential **values** never leave the orchestrator; the CLI only emits the
