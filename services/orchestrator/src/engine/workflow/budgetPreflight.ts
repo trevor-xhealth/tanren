@@ -128,9 +128,9 @@ export type BudgetPreflightRoute = Omit<BudgetPreflightInput, "ceilingUsd">;
  * Extracted so ONBOARDING READINESS asks the same question the run-setup refusal
  * answers. Before this existed, `GET /onboarding-status` held `ready:false` until a
  * ceiling was set while {@link assertBudgetCeilingEnforceable} failed that very
- * configuration closed at setup — the checklist demanded the one setting that made
- * the stack unrunnable. Readiness and the refusal now cannot disagree, because they
- * are literally the same function.
+ * configuration closed at setup — the checklist demanded the one setting that stopped
+ * the stack from running at all. Readiness and the refusal now cannot disagree,
+ * because they are literally the same function.
  *
  * `detail` states WHY in the operator's terms; `remedy` names where spend IS bounded
  * instead. Both are secret-free (the ref KIND only, never the credential value).

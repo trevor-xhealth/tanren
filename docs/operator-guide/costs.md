@@ -109,18 +109,18 @@ configured ceiling makes the budget gate latch permanently on the run's own
 unpriced rows, so `runBudgetCeilingPreflight` **refuses the run at setup**. That
 refusal is correct and stays.
 
-`GET /orgs/:orgId/onboarding-status` therefore asks the *same* question the
+`GET /orgs/:orgId/onboarding-status` therefore asks the _same_ question the
 refusal answers (`classifyCeilingEnforceability`) and reports it on
 `budget.ceilingRequirement`:
 
-| `ceilingRequirement` | Meaning | Effect on `ready` |
-| --- | --- | --- |
-| `required` | The org's default route meters real spend, so a ceiling is enforceable. | `ready:false` until `PUT /orgs/:orgId/budget` sets one. |
-| `refused` | Tanren would refuse a ceiling on this route at run setup. | An **advisory**, not a step — `ready:true` with no ceiling. If a ceiling *is* set, that becomes a blocking step to **remove** it. |
-| `undetermined` | No AI provider connected yet, so there is no route to judge. | No budget step; the connect-provider step already blocks. |
+| `ceilingRequirement` | Meaning                                                                 | Effect on `ready`                                                                                                                 |
+| -------------------- | ----------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------- |
+| `required`           | The org's default route meters real spend, so a ceiling is enforceable. | `ready:false` until `PUT /orgs/:orgId/budget` sets one.                                                                           |
+| `refused`            | Tanren would refuse a ceiling on this route at run setup.               | An **advisory**, not a step — `ready:true` with no ceiling. If a ceiling _is_ set, that becomes a blocking step to **remove** it. |
+| `undetermined`       | No AI provider connected yet, so there is no route to judge.            | No budget step; the connect-provider step already blocks.                                                                         |
 
 `budget.ceilingRequirementReason` always states which case applies and where
-spend *is* bounded instead (for OpenRouter: the spend limit on the API key
+spend _is_ bounded instead (for OpenRouter: the spend limit on the API key
 itself, which OpenRouter enforces at the biller). The verdict is computed from
 the **org's default** route; a project that overrides the routing table or its
 own `defaultLlm` is judged on its own route when the run starts.

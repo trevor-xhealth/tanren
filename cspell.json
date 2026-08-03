@@ -572,6 +572,7 @@
     "rubygems",
     "runcmd",
     "runloop",
+    "runnability",
     "rustc",
     "sandboxing",
     "sarif",
