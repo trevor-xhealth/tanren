@@ -46,13 +46,24 @@ describe("resolveRouteMetering", () => {
     expect(isCeilingEnforceable(metering)).toBe(false);
   });
 
-  it("a usage probe does NOT rescue a per_token route", () => {
-    // ccusage/credit reconcile lands at run END, so a per_token route's rows are
-    // NULL for the whole run and the per-iteration gate latches on them long before
-    // any back-fill. The probe flag must not be mistaken for a metering path here.
-    const withProbe = resolveRouteMetering({ cli: "codex", authRef: "credential/openrouter/a/b", hasUsageProbe: true });
-    const without = resolveRouteMetering({ cli: "codex", authRef: "credential/openrouter/a/b", hasUsageProbe: false });
-    expect(withProbe).toEqual(without);
+  it("the OpenRouter limitation is not codex-specific — NO harness we drive surfaces the id", () => {
+    // `HARNESSES_SURFACING_GENERATION_ID` is empty, so every harness × OpenRouter
+    // route is unmeterable. This is the negative control on that set: adding a
+    // harness to it (or special-casing the branch on `cli === "codex"`) flips one
+    // of these to `provider_response` and fails here. The detail must also name the
+    // harness ACTUALLY in the route, not a hardcoded "codex".
+    for (const cli of ["claude", "opencode"]) {
+      const metering = resolveRouteMetering({
+        cli,
+        authRef: "credential/openrouter/acme/default",
+        hasUsageProbe: true,
+      });
+      expect(metering.kind).toBe("unmeterable");
+      if (metering.kind !== "unmeterable") continue;
+      expect(metering.reason).toBe("harness_discards_generation_id");
+      expect(metering.detail).toContain(`the ${cli} CLI`);
+      expect(isCeilingEnforceable(metering)).toBe(false);
+    }
   });
 
   it("a raw upstream-provider key is UNMETERABLE for a different, named reason", () => {
@@ -63,6 +74,10 @@ describe("resolveRouteMetering", () => {
       // Distinct from the harness limitation: nothing upstream reports a per-call
       // dollar figure at all, so no harness fix would help.
       expect(metering.reason).toBe("byok_upstream_invoice");
+      // ...and it must name WHICH provider's invoice, so the two arms of this loop
+      // are distinguishable — an operator with two BYOK keys needs to know which
+      // one the refusal is about.
+      expect(metering.detail).toContain(`a raw ${ref.split("/")[1] ?? ""} API key`);
     }
   });
 
@@ -112,6 +127,12 @@ describe("narrateRouteMetering", () => {
 
 describe("assertBudgetCeilingEnforceable", () => {
   it("REFUSES a ceiling over an unmeterable per_token route, before any money is spent", async () => {
+    // This ALSO carries the "a usage probe does not rescue a per_token route" claim,
+    // and is the only place it can actually fail: `hasUsageProbe: true` below is the
+    // same flag that makes a SUBSCRIPTION ceiling reachable (last test in this
+    // block). ccusage/credit reconcile lands at run END, so a per_token route's rows
+    // are NULL for the whole run and the gate latches long before any back-fill —
+    // wiring the probe into the enforceability decision would flip this to `resolves`.
     const sink = recorder();
     await expect(
       assertBudgetCeilingEnforceable(
