@@ -168,7 +168,9 @@ async function runAuditorTerminalBlock(
     adapter: args.adapter,
     role: "auditor",
     taskId: auditorTaskId,
-    model: "tanren-auditor",
+    // The REAL model id the adapter sends, not a role pseudo-id — role travels on
+    // `role` above (→ cost_source_raw.role) so notional pricing can key on a real id.
+    model: args.adapter.model ?? "",
     runtimeSeconds,
     rawUsage: args.buildUsage?.({ auditorTaskId, verdict: result.verdict }) ?? { role: "auditor" },
   });

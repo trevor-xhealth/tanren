@@ -22,9 +22,9 @@ import {
 } from "./helpers/plannerLoopHelpers.js";
 import { InMemoryRunStateWriter } from "./fixtures/inMemoryRunStateWriter.js";
 
-// subtaskStages.ts owns the per-call event timeline + task-row transitions for
-// each planner/writer/checker/auditor invocation. These tests pin the emitted
-// event names, the task kinds, the payload values, and the outcome branch.
+// subtaskStages.ts owns the per-call event timeline + task-row transitions for each
+// planner/writer/checker/auditor invocation. These tests pin the emitted event
+// names, task kinds, payload values, and the outcome branch.
 
 interface RecordedEvent {
   eventType: EventName;
@@ -45,6 +45,7 @@ interface RecordedTask {
 interface RecordedCost {
   taskId: string;
   model: string;
+  role: string | undefined;
   cli: string;
   authRef: string;
   runtimeSeconds: number;
@@ -52,9 +53,8 @@ interface RecordedCost {
   rawUsage: Record<string, unknown>;
 }
 
-// Audit finding H3 sweep: stage helpers now REQUIRE a writer; harness derives
-// `tasks` / `taskOutcomes` from the writer's atomic row state so existing
-// assertions keep holding without churn.
+// Audit finding H3 sweep: stage helpers REQUIRE a writer; the harness derives
+// `tasks` / `taskOutcomes` from the writer's atomic row state.
 class StageHarness {
   readonly events: RecordedEvent[] = [];
   readonly costRecords: RecordedCost[] = [];
@@ -90,10 +90,8 @@ class StageHarness {
     this.events.push({ eventType, payload: payload as Record<string, unknown>, taskId });
   };
 
-  // pg-shaped query stub — task INSERTs/UPDATEs now route through the writer
-  // (audit H3 sweep) and surface on `this.tasks` (derived from writer.inserts);
-  // this stub is a no-op so any other incidental SQL the workflow drives
-  // doesn't blow up.
+  // pg-shaped query stub — task INSERTs/UPDATEs route through the writer (audit H3
+  // sweep) and surface on `this.tasks`; this no-op absorbs any incidental SQL.
   query = async (_sql: string, _params: ReadonlyArray<unknown> = []): Promise<{ rows: never[]; rowCount: number }> => {
     return { rows: [], rowCount: 1 };
   };
@@ -101,13 +99,14 @@ class StageHarness {
   costCtx(): SubtaskCostContext {
     const recorder = {
       record: async (
-        context: { taskId: string; model: string; cli: string; authRef: string; runtimeSeconds: number },
+        context: { taskId: string; model: string; role?: string; cli: string; authRef: string; runtimeSeconds: number },
         tokenUsage: Record<string, unknown>,
         rawUsage: Record<string, unknown>,
       ) => {
         this.costRecords.push({
           taskId: context.taskId,
           model: context.model,
+          role: context.role,
           cli: context.cli,
           authRef: context.authRef,
           runtimeSeconds: context.runtimeSeconds,
@@ -181,11 +180,14 @@ describe("runPlannerStage", () => {
     expect(subtasks[0]!.behaviorIds).toEqual(["B1", "B2"]);
 
     const cost = h.cost("task_plan");
-    expect(cost.model).toBe("tanren-planner");
+    // ROLE on its OWN field (→ cost_source_raw.role); `model` is the adapter's declared
+    // id — EMPTY for a `fake` (the recorder's "no model id → notional NULL, quiet"
+    // path). It was "tanren-planner", which no price source has.
+    expect(cost.role).toBe("planner");
+    expect(cost.model).toBe("");
     expect(cost.cli).toBe("fake");
     expect(cost.runtimeSeconds).toBeGreaterThan(0);
-    // Default rawUsage (no buildUsage override) must carry the planner role +
-    // attempt — pins the `?? { role: "planner", attempt }` default object.
+    // Default rawUsage (no buildUsage override) pins `?? { role: "planner", attempt }`.
     expect(cost.rawUsage).toEqual({ role: "planner", attempt: 2 });
   });
 
@@ -257,10 +259,9 @@ describe("runWriterStage", () => {
     expect(row.model).toBeNull();
     expect(h.taskOutcomes.get("task_write")).toBe("passed");
 
-    // Writer cost: fixed model, adapter cli/authRef, the writer's token usage,
-    // and the default rawUsage carrying role/attempt/subtaskIndex.
     const cost = h.cost("task_write");
-    expect(cost.model).toBe("tanren-writer");
+    expect(cost.role).toBe("writer");
+    expect(cost.model).toBe("");
     expect(cost.cli).toBe("fake");
     expect(cost.tokenUsage).toMatchObject({ totalTokens: 2 });
     expect(cost.rawUsage).toEqual({ role: "writer", attempt: 1, subtaskIndex: 0 });
@@ -398,9 +399,9 @@ describe("runCheckerStage", () => {
     expect(h.find("checker.started")!.payload.taskKind).toBe("check");
     // The pass-branch task.completed also carries the "check" kind.
     expect(h.find("task.completed")!.payload.taskKind).toBe("check");
-    // Checker cost: fixed model + default rawUsage role/subtaskIndex.
     const cost = h.cost("task_check");
-    expect(cost.model).toBe("tanren-checker");
+    expect(cost.role).toBe("checker");
+    expect(cost.model).toBe("");
     expect(cost.rawUsage).toEqual({ role: "checker", subtaskIndex: 0 });
   });
 
@@ -453,8 +454,7 @@ describe("runAuditorStage", () => {
     expect(h.names()).not.toContain("auditor.rejected");
     expect(h.taskOutcomes.get(auditorTaskId)).toBe("passed");
 
-    // Insert metadata: an "audit plan" title under the planner, owned by the
-    // answerer agent.
+    // Insert metadata: an "audit plan" title under the planner, answerer-owned.
     const row = h.task(auditorTaskId);
     expect(row.title).toBe("audit plan");
     expect(row.kind).toBe("audit");
@@ -466,9 +466,9 @@ describe("runAuditorStage", () => {
     expect(h.find("auditor.started")!.payload.taskKind).toBe("audit");
     expect(h.find("task.completed")!.payload.taskKind).toBe("audit");
 
-    // Auditor cost: fixed model + default rawUsage role.
     const cost = h.cost(auditorTaskId);
-    expect(cost.model).toBe("tanren-auditor");
+    expect(cost.role).toBe("auditor");
+    expect(cost.model).toBe("");
     expect(cost.rawUsage).toEqual({ role: "auditor" });
   });
 
@@ -476,8 +476,8 @@ describe("runAuditorStage", () => {
     const h = new StageHarness();
     const { findings, auditorTaskId } = await runAuditorStage(auditorArgs(h, p1Audit));
 
-    // SPEC-LOOP REDESIGN: the auditor renders NO verdict. It returns the emitted findings
-    // (the loop's triage/convergence route them); the audit task always marks `passed`.
+    // SPEC-LOOP REDESIGN: the auditor renders NO verdict — it returns the emitted
+    // findings (triage/convergence route them); the audit task always marks `passed`.
     expect(findings).toEqual([
       { id: "missed-behavior-B2", severity: "P1", title: "B2 not implemented", body: "B2 is uncovered." },
     ]);

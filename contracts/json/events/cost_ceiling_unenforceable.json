@@ -1,0 +1,43 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "billingMode": {
+      "type": "string"
+    },
+    "ceilingUsd": {
+      "minimum": 0,
+      "type": "number"
+    },
+    "cli": {
+      "type": "string"
+    },
+    "detail": {
+      "type": "string"
+    },
+    "reason": {
+      "enum": [
+        "harness_discards_generation_id",
+        "byok_upstream_invoice"
+      ],
+      "type": "string"
+    },
+    "refKind": {
+      "type": "string"
+    },
+    "remedy": {
+      "type": "string"
+    }
+  },
+  "required": [
+    "refKind",
+    "cli",
+    "billingMode",
+    "ceilingUsd",
+    "reason",
+    "detail",
+    "remedy"
+  ],
+  "type": "object",
+  "x-tanren-schema-id": "tanren.event.cost.ceiling_unenforceable"
+}

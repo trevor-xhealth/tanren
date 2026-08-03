@@ -150,6 +150,12 @@ export class PgBudgetGate implements BudgetGate {
         period: budget.period,
         spentUsd,
         notionalUsd,
+        // LEGIBILITY: the count was already computed and then discarded. A bare
+        // `unpriced_spend` flag tells an operator nothing about the SCALE of what
+        // could not be priced — and, crucially, nothing about the fact that the
+        // offending rows may be the current run's OWN (in which case raising the
+        // ceiling cannot clear the pause). Surface the number.
+        unpricedCount,
         failClosed: "unpriced_spend",
       };
     }
@@ -158,6 +164,7 @@ export class PgBudgetGate implements BudgetGate {
       period: budget.period,
       spentUsd,
       notionalUsd,
+      unpricedCount: 0,
     };
   }
 

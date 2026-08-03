@@ -414,13 +414,12 @@ function buildResolver(
 }
 
 /**
- * Build the run's adapters + usage probe through the injectable factories, then
- * run the BUDGET-SAFETY (M6) ceiling-reachability preflight: a configured dollar
- * ceiling against a subscription/self-hosted credential with no usage probe is
- * structurally unreachable, so the run fails closed at setup (a loud
- * `cost.ceiling_unreachable` event + a thrown error). The budget gate is the
- * injectable `input.budgetGate` seam, defaulting to the pg-backed PgBudgetGate over
- * `input.pool` (the narrow type is for test ergonomics; tests inject a gate seam).
+ * Build the run's adapters + usage probe through the injectable factories, then run
+ * the BUDGET-SAFETY ceiling preflight: a configured dollar ceiling that can never
+ * FIRE (subscription/self-hosted, no probe) or can never be CLEARED (a per_token
+ * route with no real-spend capture) fails the run closed at setup with a loud event.
+ * The budget gate is the injectable `input.budgetGate` seam, defaulting to the
+ * pg-backed PgBudgetGate over `input.pool` (tests inject a gate seam).
  */
 export async function resolveRunAdaptersWithBudgetPreflight(
   input: RunPlannerLoopInput,
@@ -460,6 +459,8 @@ export async function resolveRunAdaptersWithBudgetPreflight(
   await runBudgetCeilingPreflight(
     budgetGate,
     input.context.projectId,
+    // Metering capability is a (cli × credential) ROUTE property — meterability.ts.
+    adapters.writer.cli,
     adapters.writer.authRef,
     writerObservable,
     appendEvent,

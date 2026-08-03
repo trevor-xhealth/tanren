@@ -405,6 +405,17 @@ export interface ProjectBudgetState {
    * called "spend". The gate ignores it.
    */
   notionalUsd: number;
+  /**
+   * How many rows in the window are UN-PRICED REAL SPEND — `cost_usd IS NULL` with a
+   * real-spend-bearing `billing_mode` (`per_token` / `unattributed`). This is the
+   * exact population behind `failClosed: 'unpriced_spend'`, surfaced because the bare
+   * flag is not actionable: an operator cannot tell whether one stray row or the
+   * whole window is unpriced, nor that the rows may be the CURRENT run's own (in
+   * which case raising the ceiling cannot clear the pause — see
+   * docs/_design/openrouter-cost-attribution.md). Optional so an injected test gate
+   * need not supply it; absent means "not measured", never "zero".
+   */
+  unpricedCount?: number;
   failClosed?: BudgetFailClosedReason;
 }
 

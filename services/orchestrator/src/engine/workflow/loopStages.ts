@@ -143,7 +143,9 @@ async function runDemoRunStageBody(
     adapter: args.adapter,
     role: "demoRun",
     taskId: demoTaskId,
-    model: "tanren-demo-run",
+    // The REAL model id the adapter sends, not a role pseudo-id — role travels on
+    // `role` above (→ cost_source_raw.role) so notional pricing can key on a real id.
+    model: args.adapter.model ?? "",
     runtimeSeconds,
     rawUsage: { role: "demoRun" },
   });
@@ -327,7 +329,7 @@ async function runTriageStageBody(args: TriageStageInput, triageTaskId: string):
     adapter: args.adapter,
     role: "triage",
     taskId: triageTaskId,
-    model: "tanren-triage",
+    model: args.adapter.model ?? "",
     runtimeSeconds,
     rawUsage: { role: "triage" },
     ...(args.issueLoopId === undefined ? {} : { issueLoopId: args.issueLoopId }),
@@ -467,7 +469,7 @@ async function runConvergenceStageBody(
     adapter: args.adapter,
     role: "convergence",
     taskId: convergenceTaskId,
-    model: "tanren-convergence",
+    model: args.adapter.model ?? "",
     runtimeSeconds,
     rawUsage: { role: "convergence" },
   });

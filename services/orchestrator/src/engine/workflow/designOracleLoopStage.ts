@@ -136,7 +136,9 @@ async function runDesignOracleLoopStageBody(
     adapter: args.adapter,
     role: "designOracle",
     taskId: designOracleTaskId,
-    model: "tanren-design-oracle",
+    // The REAL model id the adapter sends, not a role pseudo-id — role travels on
+    // `role` above (→ cost_source_raw.role) so notional pricing can key on a real id.
+    model: args.adapter.model ?? "",
     runtimeSeconds: secondsSince(startedAt),
     rawUsage: { role: "designOracle" },
   });

@@ -132,7 +132,9 @@ async function runPlannerStageBody(args: PlannerStageInput): Promise<PlanAnswer>
     adapter: args.adapter,
     role: "planner",
     taskId: args.plannerTaskId,
-    model: "tanren-planner",
+    // The REAL model id the adapter sends, not a role pseudo-id — role travels on
+    // `role` above (→ cost_source_raw.role) so notional pricing can key on a real id.
+    model: args.adapter.model ?? "",
     runtimeSeconds,
     rawUsage: args.buildUsage?.({ plannerTaskId: args.plannerTaskId, attempt: args.attempt }) ?? {
       role: "planner",
@@ -391,7 +393,7 @@ async function runCheckerStageBody(args: CheckerStageInput): Promise<CheckerDeci
     adapter: args.adapter,
     role: "checker",
     taskId: args.checkerTaskId,
-    model: "tanren-checker",
+    model: args.adapter.model ?? "",
     runtimeSeconds,
     rawUsage: args.buildUsage?.({
       checkerTaskId: args.checkerTaskId,
