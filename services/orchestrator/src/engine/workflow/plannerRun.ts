@@ -51,7 +51,7 @@ import {
   simulatedReviewSeam,
 } from "./plannerRunAdapters.js";
 import { prepareRunWorkspace, type BootstrapStepInput, type CommitBootstrapStepInput } from "./plannerRunWorkspace.js";
-import type { ProvisionMiseToolchainInput } from "../workspace/bootstrap.js";
+import type { ProvisionMiseToolchainInput } from "../workspace/toolchainProvision.js";
 import type {
   AncestorPhaseReader,
   BootstrapStackHeadShaWriteBack,

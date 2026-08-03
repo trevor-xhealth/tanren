@@ -21,10 +21,16 @@
 // — never an infinite loop.
 //
 // CRITICAL DISTINCTION — this is ONLY the project's `just bootstrap` (deps install),
-// the WRITER-OWNED scaffold. The mise PROVISION step (`mise trust && mise install` →
-// `WorkspaceMiseProvisionError`) is NOT writer-fixable (it is the declared toolchain /
-// network / runner) and runs at workspace-prep BEFORE the writer loop, so it keeps its
-// loud terminal halt. This boundary never touches it.
+// the WRITER-OWNED scaffold. TWO sibling failures are deliberately NOT writer-fixable
+// and keep their loud terminal halt; this boundary never touches either:
+//   - the TOOLCHAIN PROVISION step (`WorkspaceMiseProvisionError`) — the declared
+//     toolchain / network / runner, and it runs at workspace-prep before the writer loop;
+//   - a MISSING TOOLCHAIN BINARY (`WorkspaceToolchainUnavailableError`, classified in
+//     workspace/toolchainProvision.ts). This one used to arrive here disguised as an
+//     ordinary deps-install failure — the live `pnpm: command not found` / exit 127 —
+//     and got a remediation writer dispatched at it. That is an UNWINNABLE loop: no edit
+//     to any source file installs a binary, so the writer re-reads the same error until
+//     the convergence budget runs out. Infrastructure faults halt; they do not route.
 //
 // STACK-AGNOSTIC: Tanren names no stack here. It does NOT special-case pnpm/esbuild —
 // it routes the bootstrap output to the writer, who handles its stack's specifics.
@@ -48,7 +54,9 @@ export const BOOTSTRAP_GATE_STEP = "deps-install";
  * (deps install) exited nonzero / timed out: a WRITER-FIXABLE scaffold defect.
  *
  * DELIBERATELY narrow. A `WorkspaceMiseProvisionError` (the declared-toolchain
- * provision) is NOT writer-fixable and is excluded — it keeps its loud terminal halt.
+ * provision) and a `WorkspaceToolchainUnavailableError` (the project's bootstrap called
+ * a toolchain binary no declaration provisions) are NOT writer-fixable and are excluded
+ * by class — both keep their loud terminal halt.
  * Any other throw (a substrate/transport fault) is also excluded so a transient
  * runner hiccup is never recast as a fixable scaffold finding (no-silent-fallback) —
  * it keeps its loud-throw → run-fail semantics, identical to how `gateConfigFailure`

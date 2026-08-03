@@ -28,8 +28,17 @@ import { quoteSshShellArg } from "./command.js";
 
 // The conventional path of the project's `mise.toml` (mirrors
 // SKELETON_MISE_CONFIG_PATH; kept local so this ssh helper has no scaffold dep). The
-// guard tests for THIS file in the command's cwd before activating.
-const MISE_CONFIG_REL_PATH = "mise.toml";
+// guard tests for THIS file in the command's cwd before activating. Exported because
+// Layer-1 detection (workspace/toolchainDeclarations.ts) keys its "defer to the repo's
+// own mise config" short-circuit on the SAME path — one definition, never two that drift.
+export const MISE_CONFIG_REL_PATH = "mise.toml";
+
+// Marker written by a SUCCESSFUL, VERIFIED Tanren toolchain provision (workspace/
+// toolchainProvision.ts). It lives in the runner user's home — runner-scoped, like the
+// global mise config it pairs with, and deliberately OUTSIDE the workspace so Tanren
+// never materializes a file into a repository it did not author. Its presence is the
+// second activation trigger below.
+export const TOOLCHAIN_PROVISIONED_MARKER = "$HOME/.tanren-toolchain-provisioned";
 
 // The mise activation prelude. It uses the `--shims` mode of `mise activate`, which
 // emits a plain, POSIX `export PATH="…/shims:$PATH"` that IMMEDIATELY puts the project's
@@ -49,16 +58,41 @@ const MISE_CONFIG_REL_PATH = "mise.toml";
 // touches PATH at all. The `--shims` export is POSIX-clean and is inherited by child
 // shells, so the toolchain survives into `just`/`sh -c` sub-invocations too.
 //
-// GUARDED: it only activates when a `mise.toml` exists in the cwd, so a project that
-// declared NO toolchain (no mise.toml materialized) runs exactly as before (the
-// activation is skipped, a pure no-op). `MISE_YES=1` keeps any mise sub-action
+// TWO GUARDED BRANCHES, and the split is deliberate:
+//
+//   1. The repo ships its OWN `mise.toml` — unchanged: `mise activate --shims`, mise's
+//      own dynamic per-directory activation, exactly as before. A repo that states its
+//      toolchain explicitly gets mise's native behaviour, untouched.
+//
+//   2. Tanren DETECTED and provisioned the toolchain from the repo's standard
+//      declarations (`package.json#packageManager`, `.nvmrc`, a lockfile, …) — the
+//      marker is present. Here we use `mise env -s bash`, which emits a plain POSIX
+//      `export PATH=<installs of the RESOLVED tools>:$PATH`, and NOT the shims dir.
+//      WHY THE DIFFERENCE: the shims directory contains a shim for every tool in the
+//      runner's shared mise store, including ones this repo never declared. Putting it
+//      on PATH shadows them — a repo that declared only pnpm but calls the runner's
+//      baseline `go` gets `mise ERROR No version is set for shim: go` instead of the
+//      working binary that was there a moment ago. That is measured behaviour on the
+//      golden image, not a theoretical concern. Branch 1 accepts that exposure because
+//      the repo asked for mise by name; branch 2 must not introduce it for the far
+//      larger population of repos that never mentioned mise at all. `mise env` puts
+//      ONLY the declared tools on PATH, so nothing undeclared is shadowed.
+//
+// Both branches emit a plain `export PATH=…` that takes effect IMMEDIATELY in the
+// non-interactive `bash -c`/`sh -c` we run over SSH and is inherited by child shells,
+// so the toolchain survives into `just`/`sh -c` sub-invocations.
+//
+// GUARDED: with neither trigger present the activation is skipped and the command runs
+// exactly as before — a pure no-op. `MISE_YES=1` keeps any mise sub-action
 // non-interactive. The whole prelude is one `if … fi; ` statement chained before the
-// real command with `;` (NOT `&&`): a project with no mise.toml must still run its
+// real command with `;` (NOT `&&`): a project with no toolchain must still run its
 // command — the guard is a skip, not a gate.
 function miseActivationPrelude(): string {
   return (
     `if [ -f ${quoteSshShellArg(MISE_CONFIG_REL_PATH)} ]; then ` +
-    `export MISE_YES=1; eval "$(mise activate bash --shims)"; fi; `
+    `export MISE_YES=1; eval "$(mise activate bash --shims)"; ` +
+    `elif [ -f "${TOOLCHAIN_PROVISIONED_MARKER}" ]; then ` +
+    `export MISE_YES=1; eval "$(mise env -s bash)"; fi; `
   );
 }
 

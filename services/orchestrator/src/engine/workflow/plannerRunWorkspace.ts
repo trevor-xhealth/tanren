@@ -129,16 +129,17 @@ export async function prepareRunWorkspace(
   const resolvedBootstrapCommand =
     input.bootstrapCommand ?? (await resolveBootstrapCommand({ ssh: input.ssh, target, workspacePath }));
   // TOOLCHAIN PROVISION (environment-management.md §3 Layer 2): BEFORE the project's
-  // `just bootstrap`, provision the declared toolchain. When the workspace already ships
-  // a `mise.toml` at clone time (a brownfield/template-seeded repo) `mise trust && mise
-  // install` lands the tools in the `tanren` user space so the bootstrap's bare
-  // `pnpm`/`node` resolves correctly; a guarded no-op when no `mise.toml` is present
-  // (the greenfield scaffold's first bootstrap is an empty repo — its mise.toml lands
-  // with the contract files below, and the per-gate `ensureWorkspaceDepsInstalled`
-  // provisions before each later bootstrap). A failed `mise install` HALTS the run
-  // LOUDLY (WorkspaceMiseProvisionError) — never a silent skip. This is the PROJECT
-  // path; codex/answerers keep the runner's isolated harness node (mise stays
-  // un-globally-activated). Test seam: an injected `provisionMise` overrides it.
+  // `just bootstrap`, provision the toolchain the repo DECLARES. Detection reads the
+  // repo's own `mise.toml` when it ships one and otherwise the standard declaration
+  // files it does ship (`package.json#packageManager`, `.nvmrc`, `.python-version`,
+  // lockfiles, …) — the widening that lets a mainstream polyglot repo be gated at all;
+  // provisioning is mise either way, and every declared binary is VERIFIED on PATH
+  // before this returns. Genuinely nothing to provision (a greenfield scaffold's first
+  // bootstrap is an empty repo) stays a stated no-op; a failed provision or an
+  // unverifiable binary HALTS the run LOUDLY (WorkspaceMiseProvisionError) — never a
+  // silent skip. This is the PROJECT path; codex/answerers keep the runner's isolated
+  // harness node (mise stays un-globally-activated). Test seam: an injected
+  // `provisionMise` overrides it.
   const provisionMise =
     input.provisionMise ?? ((stepInput: ProvisionMiseToolchainInput) => provisionMiseToolchain(stepInput));
   await provisionMise({ ssh: input.ssh, target, workspacePath });

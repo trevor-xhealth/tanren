@@ -85,6 +85,12 @@ The project ships its toolchain declaration in its repo, version-controlled:
   pins exact versions + checksums + URLs (the determinism + cache-key anchor).
 - **Escape-hatch tier — `flake.nix`.** For the genuine long tail (decades-old C/Fortran,
   exotic system-lib pinning, byte-reproducible nightly) the project ships a Nix flake.
+- **Brownfield tier — the repo's existing declaration files.** Most repositories in the
+  world declare their toolchain without ever mentioning mise:
+  `package.json#packageManager`, `.nvmrc`/`.node-version`, `.python-version`,
+  `.ruby-version`, `.tool-versions`, `go.mod`, `rust-toolchain.toml`, or simply a
+  lockfile (`pnpm-lock.yaml`, `uv.lock`, …). Tanren reads these too and provisions
+  through the same Layer-2 mise provisioner.
 
 The **writer authors** this file as part of the scaffold; the **architecture step seeds**
 the initial versions. Versions are always the project's choice — never Tanren's. To
@@ -93,8 +99,24 @@ optional **toolchain declaration** (the resolved tool set), and the scaffold ske
 materializes the `mise.toml`/`flake.nix` the same deterministic way it already
 materializes `justfile` + `.tanren/ci.yml`.
 
-**Selection rule Tanren applies:** `flake.nix` present → Nix tier; else → mise tier.
-Tanren detects the file; it never picks the versions.
+**Selection rule Tanren applies:** `flake.nix` present → Nix tier; a repo `mise.toml`
+present → mise tier, read verbatim; else → mise tier, driven by the standard declaration
+files above. Tanren detects the file; it never picks the versions.
+
+A LOCKFILE declares the TOOL; a version file/field declares the VERSION. A tool declared
+by a lockfile alone is provisioned unconstrained and _reported as such_ — Tanren never
+silently pins a version the project did not choose. A declaration Tanren reads but cannot
+turn into a tool it can provision (`lts/iron`, `channel = "stable"`, an unknown package
+manager) is announced in the provisioning log, never dropped.
+
+**Provisioning is verified, and a toolchain that cannot be provisioned halts.** After installing,
+Tanren asserts each declared binary resolves on `PATH` and fails with the tool, version
+and declaring file if it does not. And when a project's bootstrap calls a toolchain
+binary nothing declares, the failure is classified as an _infrastructure_ fault and the
+run halts — it is never routed to a remediation writer, because no source edit installs a
+binary. (Both behaviors replace the earlier failure mode, where a repo without a
+`mise.toml` was read as "declared no toolchain", provisioning was silently skipped, and
+the run died three layers downstream on an opaque `pnpm: command not found`.)
 
 ### Layer 2 — Provisioning (the neutral, capable runner)
 

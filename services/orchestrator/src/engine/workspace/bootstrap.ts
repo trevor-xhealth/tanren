@@ -9,9 +9,11 @@ import type { RunnerHandle } from "../contracts/allocator.js";
 import type { CommandResult, CommandSubstrate } from "../contracts/commandSubstrate.js";
 import { quoteSshShellArg } from "../ssh/command.js";
 import { withAppEnv } from "../ssh/appEnvPrelude.js";
-import { miseProvisionCommand, withMiseActivation } from "../ssh/miseActivate.js";
+import { withMiseActivation } from "../ssh/miseActivate.js";
 import { buildActivityWatchdog } from "../ssh/activityWatchdog.js";
 import { WORKSPACE_LOCAL_IGNORE_PATHS } from "./localIgnorePaths.js";
+import { combinedOutput, failureReason, tailOf } from "./outputTail.js";
+import { classifyToolchainFault, resolveWorkspaceToolchain, toolchainProvisionCommand } from "./toolchainProvision.js";
 import { runWorkspaceSshCommand } from "./ssh.js";
 
 // The commit message used for the synthetic post-bootstrap commit. Install
@@ -19,11 +21,6 @@ import { runWorkspaceSshCommand } from "./ssh.js";
 // in THIS commit, off the writer's base, so the writer's diff and the pushed PR
 // branch carry only the writer's real changes — never bootstrap-generated files.
 export const BOOTSTRAP_COMMIT_MESSAGE = "tanren: bootstrap";
-
-// The install command tail surfaced on a bootstrap failure. Output can be
-// large; we keep only the last N characters so the typed error and the
-// recovery surface carry a useful, bounded diagnostic.
-const OUTPUT_TAIL_LIMIT = 4_000;
 
 // The path of the conventional lifecycle file (engine/forge/scaffold/skeleton.ts):
 // a project declares its stack's bootstrap in `just bootstrap`. This LOUD-fallback
@@ -133,64 +130,11 @@ export async function bootstrapWorkspace(input: BootstrapWorkspaceInput): Promis
   return result;
 }
 
-// A typed, observable mise-provisioning failure (environment-management.md §3). Carries
-// the exit code + a bounded output tail so a halting run has a concrete diagnostic. Per
-// the no-silent-fallback doctrine a failed `mise install` HALTS the run loudly — never a
-// silent skip of the project's declared toolchain.
-export class WorkspaceMiseProvisionError extends Error {
-  override readonly name = "WorkspaceMiseProvisionError";
-
-  constructor(
-    readonly workspacePath: string,
-    readonly exitCode: number | null,
-    readonly outputTail: string,
-    readonly stalled: boolean,
-  ) {
-    super(miseProvisionFailureMessage(exitCode, outputTail, stalled));
-  }
-}
-
-export interface ProvisionMiseToolchainInput {
-  ssh: CommandSubstrate;
-  target: RunnerHandle;
-  workspacePath: string;
-}
-
-// Provision the project's DECLARED toolchain at workspace-prep, BEFORE the project's
-// `just bootstrap` runs (environment-management.md §3 Layer 2). When a `mise.toml` is
-// present in the workspace, run `mise trust <mise.toml>` (mise's config-trust security
-// gate — the file is Tanren-materialized + trusted) then `mise install` over SSH, which
-// downloads the declared tools into the `tanren` user space (no root-owned writes — the
-// corepack `/usr/bin` EACCES is gone). When no `mise.toml` is present (the project
-// declared no toolchain) it is a guarded no-op. A nonzero exit / timeout / substrate
-// failure throws `WorkspaceMiseProvisionError` so the run halts LOUDLY — never a silent
-// skip. This is the PROJECT path; it never touches Tanren's harness (codex keeps the
-// runner's isolated node — mise is not globally activated).
-export async function provisionMiseToolchain(input: ProvisionMiseToolchainInput): Promise<void> {
-  const result = await input.ssh.run(input.target, {
-    // `set -e` so a failed `mise trust`/`mise install` surfaces a nonzero exit (the
-    // guard's `&&` chain already aborts on the first failure within the present branch).
-    command: `set -e; ${miseProvisionCommand()}`,
-    cwd: input.workspacePath,
-    // VCS/provision op: output-driven + the workspace as the silent-stretch liveness
-    // probe (mise install writes the toolchain as it works). Never killed for elapsed time.
-    watchdog: buildActivityWatchdog({
-      substrate: input.ssh,
-      target: input.target,
-      cls: "vcs",
-      workspace: input.workspacePath,
-    }),
-  });
-  const succeeded = result.failure === undefined && result.stalled !== true && result.exitCode === 0;
-  if (!succeeded) {
-    throw new WorkspaceMiseProvisionError(
-      input.workspacePath,
-      result.exitCode,
-      tailOf(combinedOutput(result)),
-      result.stalled === true,
-    );
-  }
-}
+// The toolchain-provisioning step (`provisionMiseToolchain`, `WorkspaceMiseProvisionError`)
+// and the infrastructure-fault classifier live in ./toolchainProvision.ts, which carries
+// the full rationale: Layer-1 detection over a repo's standard declaration files, Layer-2
+// provisioning through mise, and the post-provision binary verification that turns a
+// silently-skipped toolchain into a loud, attributable halt.
 
 // The sentinel the guarded install prints on the NO-OP path (manifest absent, or
 // deps already installed). It rides on stdout so the caller can distinguish a
@@ -288,15 +232,27 @@ export async function ensureWorkspaceDepsInstalled(
   // cheap no-op. `set -e` is intentionally NOT used at the top — the `if`/`else`
   // already controls flow and the bootstrap command surfaces its own nonzero exit.
   // TOOLCHAIN PROVISION (environment-management.md §3): inside the contract-present
-  // branch, BEFORE the project's bootstrap, provision the declared toolchain — `mise
-  // trust && mise install` when a `mise.toml` is present (a no-op when none). Chained
-  // with `&&` so a failed install ABORTS the branch (the project's bootstrap never runs
-  // against a tree whose toolchain failed to install — the nonzero exit surfaces as
-  // WorkspaceDepsInstallError, a LOUD halt). `miseProvisionCommand()` is self-guarding (skips when no
-  // mise.toml), so a no-toolchain project runs the project's bootstrap exactly as before.
+  // branch, BEFORE the project's bootstrap, provision the toolchain the repo DECLARES —
+  // its own `mise.toml` if it ships one, otherwise whatever its standard declaration
+  // files say (`package.json#packageManager`, `.nvmrc`, `.python-version`, a lockfile,
+  // …). Detection needs the repo's bytes, so it is resolved here, in its own round-trip,
+  // BEFORE the guard is built; the resulting command verifies each declared binary is on
+  // PATH and exits nonzero naming the file that declared it if not.
+  //
+  // Re-detected every gate on purpose: a writer that ADDS a declaration mid-run (a new
+  // `packageManager` field, a new lockfile) must get that toolchain provisioned before
+  // the next gate, exactly as a writer-added dependency must get installed.
+  //
+  // Chained with `&&` so a failed provision ABORTS the branch — the project's bootstrap
+  // never runs against a tree whose toolchain is not there.
+  const detection = await resolveWorkspaceToolchain({
+    ssh: input.ssh,
+    target: input.target,
+    workspacePath: input.workspacePath,
+  });
   const guarded =
     `if [ -f ${JUSTFILE_PATH} ] || [ -f .tanren/ci.yml ]; then ` +
-    `echo ${quoteSshShellArg(DEPS_INSTALL_SENTINEL)}; ${miseProvisionCommand()} && { ${command}; }; ` +
+    `echo ${quoteSshShellArg(DEPS_INSTALL_SENTINEL)}; { ${toolchainProvisionCommand(detection)}; } && { ${command}; }; ` +
     `else echo ${quoteSshShellArg(DEPS_NOOP_SENTINEL)}; fi`;
   // SUBSTRATE BOUNDARY: the app-env prelude is prepended to the EXECUTED guard
   // ONLY, never to `command` (the value carried into the error below), so a
@@ -321,11 +277,29 @@ export async function ensureWorkspaceDepsInstalled(
 
   const succeeded = result.failure === undefined && result.stalled !== true && result.exitCode === 0;
   if (!succeeded) {
+    const outputTail = tailOf(combinedOutput(result));
+    // INFRASTRUCTURE-FAULT TRIAGE (the second half of the fix). A deps-install that died
+    // because a TOOLCHAIN BINARY is missing is not a scaffold defect: no source edit
+    // installs a program. Routing it to the writer — which is what a
+    // `WorkspaceDepsInstallError` does — spends the whole convergence budget on a loop
+    // that cannot be won. Classified as infra, it halts here with a message that names
+    // the missing binary, what the repo declared, and how to declare it. A missing
+    // `vitest`/`tsc`/project script is NOT claimed by this and keeps its writer route.
+    const infraFault = classifyToolchainFault({
+      workspacePath: input.workspacePath,
+      command,
+      exitCode: result.exitCode,
+      outputTail,
+      detection,
+    });
+    if (infraFault !== undefined) {
+      throw infraFault;
+    }
     throw new WorkspaceDepsInstallError(
       input.workspacePath,
       command,
       result.exitCode,
-      tailOf(combinedOutput(result)),
+      outputTail,
       result.stalled === true,
     );
   }
@@ -335,21 +309,14 @@ export async function ensureWorkspaceDepsInstalled(
   return { installed: result.stdout.includes(DEPS_INSTALL_SENTINEL) };
 }
 
-function miseProvisionFailureMessage(exitCode: number | null, outputTail: string, stalled: boolean): string {
-  const reason = stalled ? "stalled (no sign of life)" : `exited ${exitCode ?? "unknown"}`;
-  const tail = outputTail === "" ? "" : `: ${outputTail}`;
-  return `workspace mise toolchain provision (mise trust && mise install) ${reason}${tail}`;
-}
-
 function depsInstallFailureMessage(
   command: string,
   exitCode: number | null,
   outputTail: string,
   stalled: boolean,
 ): string {
-  const reason = stalled ? "stalled (no sign of life)" : `exited ${exitCode ?? "unknown"}`;
   const tail = outputTail === "" ? "" : `: ${outputTail}`;
-  return `workspace deps install (${command}) ${reason}${tail}`;
+  return `workspace deps install (${command}) ${failureReason(exitCode, stalled)}${tail}`;
 }
 
 // The paths added to the workspace's LOCAL git ignore (`.git/info/exclude`) right
@@ -464,28 +431,12 @@ export async function resolveWorkspaceHeadSha(input: {
   return sha;
 }
 
-function combinedOutput(result: CommandResult): string {
-  if (result.failure !== undefined) {
-    const detail = "message" in result.failure ? result.failure.message : result.failure.reason;
-    return [result.stdout, result.stderr, detail].filter((part) => part !== undefined && part !== "").join("\n");
-  }
-  return [result.stdout, result.stderr].filter((part) => part !== "").join("\n");
-}
-
-function tailOf(output: string): string {
-  if (output.length <= OUTPUT_TAIL_LIMIT) {
-    return output;
-  }
-  return output.slice(output.length - OUTPUT_TAIL_LIMIT);
-}
-
 function bootstrapFailureMessage(
   command: string,
   exitCode: number | null,
   outputTail: string,
   stalled: boolean,
 ): string {
-  const reason = stalled ? "stalled (no sign of life)" : `exited ${exitCode ?? "unknown"}`;
   const tail = outputTail === "" ? "" : `: ${outputTail}`;
-  return `workspace bootstrap (${command}) ${reason}${tail}`;
+  return `workspace bootstrap (${command}) ${failureReason(exitCode, stalled)}${tail}`;
 }

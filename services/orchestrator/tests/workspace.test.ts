@@ -12,6 +12,7 @@ import {
   WorkspaceBootstrapError,
   WorkspaceCommandError,
   WorkspaceDepsInstallError,
+  WorkspaceMiseProvisionError,
   workspaceRepoPathForRun,
 } from "../src/engine/workspace/index.js";
 
@@ -249,8 +250,23 @@ describe("ensureWorkspaceDepsInstalled (greenfield deps-ensure)", () => {
       // When the bootstrap runs, the exit code it returns (0 = success, else fail).
       private readonly installExit: number = 0,
     ) {}
+    // The guarded install is the SECOND round-trip: deps-ensure first probes the repo's
+    // toolchain DECLARATION files (the widening that lets a repo without a mise.toml be
+    // provisioned at all), then builds the guard from what it found. `guard` names that
+    // second command so these assertions stay about the guard, not the probe.
+    get guard(): RunnerCommand | undefined {
+      return this.commands[1];
+    }
+    get declarationProbe(): RunnerCommand | undefined {
+      return this.commands[0];
+    }
     async run(_target: RunnerHandle, command: RunnerCommand): Promise<CommandResult> {
       this.commands.push(command);
+      // The declaration probe: this virtual workspace ships no toolchain declaration,
+      // so it emits nothing (exit 0) — the "repo declared nothing" case.
+      if (command.command.includes("TANREN-TOOLCHAIN-DECLARATION")) {
+        return { exitCode: 0, stdout: "", stderr: "" };
+      }
       // The guard: bootstrap whenever the contract exists (prepared state is
       // irrelevant — a redundant bootstrap is a cheap no-op the project's recipe owns).
       const shouldInstall = this.fs.contract;
@@ -278,8 +294,11 @@ describe("ensureWorkspaceDepsInstalled (greenfield deps-ensure)", () => {
     expect(result.installed).toBe(true);
     expect(ssh.installRan).toBe(true);
     // The guard runs in the workspace dir and embeds the resolved bootstrap command.
-    expect(ssh.commands[0]?.command).toContain("just bootstrap");
-    expect(ssh.commands[0]?.cwd).toBe(workspacePath);
+    expect(ssh.guard?.command).toContain("just bootstrap");
+    expect(ssh.guard?.cwd).toBe(workspacePath);
+    // …and it was preceded by the toolchain-declaration probe, in the same dir.
+    expect(ssh.declarationProbe?.command).toContain("TANREN-TOOLCHAIN-DECLARATION");
+    expect(ssh.declarationProbe?.cwd).toBe(workspacePath);
   });
 
   // P0 CORE REGRESSION: the bootstrap re-runs whenever the contract exists, EVEN when
@@ -292,8 +311,8 @@ describe("ensureWorkspaceDepsInstalled (greenfield deps-ensure)", () => {
     expect(ssh.installRan).toBe(true);
     // The guard probes for the project CONTRACT (justfile / .tanren/ci.yml), NO stack
     // manifest (package.json / node_modules).
-    expect(ssh.commands[0]?.command).toMatch(/justfile|\.tanren\/ci\.yml/u);
-    expect(ssh.commands[0]?.command).not.toMatch(/package\.json|node_modules/u);
+    expect(ssh.guard?.command).toMatch(/justfile|\.tanren\/ci\.yml/u);
+    expect(ssh.guard?.command).not.toMatch(/node_modules/u);
   });
 
   it("no-ops when no contract exists yet (greenfield clone HEAD, pre-writer)", async () => {
@@ -306,9 +325,11 @@ describe("ensureWorkspaceDepsInstalled (greenfield deps-ensure)", () => {
   it("defaults to the stack-agnostic `just bootstrap` LOUD-fallback", async () => {
     const ssh = new FsAwareSsh({ contract: true, prepared: false });
     await ensureWorkspaceDepsInstalled({ ssh, target, workspacePath });
-    expect(ssh.commands[0]?.command).toContain(DEFAULT_BOOTSTRAP_COMMAND);
+    expect(ssh.guard?.command).toContain(DEFAULT_BOOTSTRAP_COMMAND);
     // No baked-in stack command — the project's `just bootstrap` owns the install.
-    expect(ssh.commands[0]?.command).not.toMatch(/pnpm|npm|corepack/u);
+    // (This workspace declares no toolchain, so nothing is provisioned either: Tanren
+    // still names no stack of its own, it only honors what a repo declares.)
+    expect(ssh.guard?.command).not.toMatch(/pnpm|npm|corepack/u);
   });
 
   it("keeps the app-env prelude OFF the command field — no secret in the typed error", async () => {
@@ -333,11 +354,16 @@ describe("ensureWorkspaceDepsInstalled (greenfield deps-ensure)", () => {
     expect(typed.outputTail).toContain("vitest: not found");
     // The EXECUTED guard carried the prelude (the substrate boundary), so the env
     // is materialized for the bootstrap but never leaks into the error.
-    expect(ssh.commands[0]?.command).toContain("super-secret-value");
+    expect(ssh.guard?.command).toContain("super-secret-value");
   });
 
   it("throws a typed error on a timeout / substrate failure", async () => {
-    const timedOut = new ScriptedSsh([{ exitCode: null, stdout: "", stderr: "", stalled: true }]);
+    // Round-trip 1 (the declaration probe) succeeds with no declarations; round-trip 2
+    // (the guarded install) stalls.
+    const timedOut = new ScriptedSsh([
+      { exitCode: 0, stdout: "", stderr: "" },
+      { exitCode: null, stdout: "", stderr: "", stalled: true },
+    ]);
     const timeoutError = await ensureWorkspaceDepsInstalled({
       ssh: timedOut,
       target,
@@ -345,6 +371,19 @@ describe("ensureWorkspaceDepsInstalled (greenfield deps-ensure)", () => {
     }).catch((caught: unknown) => caught);
     expect(timeoutError).toBeInstanceOf(WorkspaceDepsInstallError);
     expect((timeoutError as WorkspaceDepsInstallError).message).toContain("stalled (no sign of life)");
+  });
+
+  it("a FAILED declaration probe halts — it is never read as `this repo declares nothing`", async () => {
+    // The original defect in miniature: concluding "no toolchain" from something that
+    // was not actually a clean read is how a silent skip becomes a downstream exit 127.
+    // A probe that stalls must throw, not shrug.
+    const probeStalled = new ScriptedSsh([{ exitCode: null, stdout: "", stderr: "", stalled: true }]);
+    const error = await ensureWorkspaceDepsInstalled({ ssh: probeStalled, target, workspacePath }).catch(
+      (caught: unknown) => caught,
+    );
+    expect(error).toBeInstanceOf(WorkspaceMiseProvisionError);
+    // And it is NOT the writer-routable class — an unreadable runner is not a scaffold defect.
+    expect(error).not.toBeInstanceOf(WorkspaceDepsInstallError);
   });
 });
 

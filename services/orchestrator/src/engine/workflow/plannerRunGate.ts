@@ -241,9 +241,13 @@ export function buildDefaultGate(
     // retried; the convergence answerer (the sole loop bound) terminates a scaffold the
     // writer cannot fix within budget. ANY OTHER throw — a substrate/transport fault, OR
     // a `WorkspaceMiseProvisionError` (the declared-toolchain provision, NOT writer-
-    // fixable) — propagates loudly and halts the run (no-silent-fallback). Note the mise
-    // provision runs at workspace-prep BEFORE this loop, so it never reaches here; this
-    // catch only ever sees the project's `just bootstrap`.
+    // fixable) or a `WorkspaceToolchainUnavailableError` (the bootstrap called a toolchain
+    // binary nothing declared — an INFRASTRUCTURE fault; no source edit installs a binary,
+    // so dispatching a writer at it is an unwinnable loop) — propagates loudly and halts
+    // the run (no-silent-fallback). The first full provision runs at workspace-prep BEFORE
+    // this loop, but `ensureWorkspaceDepsInstalled` re-reads the repo's declarations each
+    // gate (a writer may ADD one mid-run), so an unreadable runner can surface a
+    // `WorkspaceMiseProvisionError` here too — and it halts, exactly as it does there.
     //
     // The command is the resolved one (an `input.bootstrapCommand` override or the
     // repo's `.tanren/ci.yml` `bootstrap.run`, conventionally `just bootstrap`), or —
