@@ -88,12 +88,12 @@ async function seedQueuedRun(): Promise<void> {
       [runId, specId, projectId, orgId],
     );
     await owner.query(
+      // Mirrors createQueuedRunFromSpec's placeholder row (UNASSIGNED_PLANNER_CLI).
       `INSERT INTO tasks (task_id, run_id, org_id, kind, title, status, agent_kind, cli, model)
-       VALUES ($1, $2, $3, 'plan', 'Plan spec implementation', 'queued', 'answerer', 'fake', 'gpt-5-codex')`,
+       VALUES ($1, $2, $3, 'plan', 'Plan spec implementation', 'queued', 'answerer', 'unassigned', NULL)`,
       [plannerTaskId, runId, orgId],
     );
-    // The same job_queue insert createQueuedRunFromSpec does — stamps org_id so
-    // the worker hydrates the run under runWithOrgScope(jobOrgId).
+    // The same job_queue insert createQueuedRunFromSpec does — stamps org_id so the worker hydrates under runWithOrgScope.
     await owner.query(
       `INSERT INTO job_queue (run_id, task_id, task_kind, payload, org_id)
        VALUES ($1, $2, 'plan', $3::jsonb, $4)`,

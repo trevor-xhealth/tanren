@@ -22,7 +22,25 @@ export type { CreateProjectInput, CreateProjectOptions, ProjectContract } from "
 export type ProjectSpecQueryClient = Pick<pg.Pool | pg.PoolClient, "query">;
 type QueryClient = ProjectSpecQueryClient;
 
-const initialPlannerModel = "fake-planner";
+/**
+ * The `tasks.cli` value on the PLACEHOLDER plan row this module pre-creates.
+ *
+ * The row is LOAD-BEARING, not decoration: `job_queue.task_id` FK-references it,
+ * `SpecRunContract.plannerTaskId` is returned to the caller and stamped on the
+ * `run.queued` / `task.queued` events, and `merge/recoveryEvidencePg.ts` binds a
+ * recovery receipt to it (`kind = 'plan'`). It exists because the run is queued
+ * BEFORE any worker has resolved the run's routing, so the real harness is not yet
+ * known — and `tasks.cli` is NOT NULL. The worker supersedes it via
+ * `applySupersedeQueuedPlannerTask` the moment it inserts the real planner task with
+ * the resolved `cli` (e.g. `codex`).
+ *
+ * It used to carry `cli = 'fake'` / `model = 'fake-planner'`, which in a `SELECT` or
+ * a DB dump reads exactly like a deterministic fallback provider running in
+ * production — and collides with the `fake` cli the TEST fixtures use for a stubbed
+ * adapter. `unassigned` (with a NULL model, which the column allows) states the
+ * actual fact: no harness has been assigned yet.
+ */
+export const UNASSIGNED_PLANNER_CLI = "unassigned";
 
 export interface SpecTriageProvenance {
   parentSpecId: string;
@@ -303,10 +321,12 @@ export async function createQueuedRunFromSpecOnClient(
   // OBSERVE-ONLY: UPSERT the `integration_nodes` row mirroring this run (see the hook header). NEVER fails a run.
   await observeRunAsIntegrationNode(client, run, spec);
   await claimPendingSpec(client, loaded.spec);
+  // The placeholder plan row (see UNASSIGNED_PLANNER_CLI): `model` stays NULL —
+  // no harness, and therefore no model, has been assigned at queue time.
   await client.query(
     `INSERT INTO tasks (task_id, run_id, org_id, kind, title, status, agent_kind, cli, model)
-     VALUES ($1, $2, (SELECT org_id FROM runs WHERE run_id = $2), 'plan', 'Plan spec implementation', 'queued', 'answerer', 'fake', $3)`,
-    [plannerTaskId, run.runId, initialPlannerModel],
+     VALUES ($1, $2, (SELECT org_id FROM runs WHERE run_id = $2), 'plan', 'Plan spec implementation', 'queued', 'answerer', $3, NULL)`,
+    [plannerTaskId, run.runId, UNASSIGNED_PLANNER_CLI],
   );
   const job = await client.query(
     // RLS R3b: stamp the run's org_id on the queue row (job_queue is OUTSIDE RLS).
