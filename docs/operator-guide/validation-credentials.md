@@ -172,29 +172,68 @@ do not conflate them:
   `credential/<kind>/org/<orgId>/<name>`. This is the only userland import path.
 - **Platform-scoped refs** (`platform/`-prefixed) are HOSTING config the operator
   API cannot — by design — write: it always anchors a ref to the authenticated
-  tenant. Today the sole platform ref is the managed-LLM router key at
-  `credential/openrouter/platform/default` (the manifest's `managed-router`
-  connector, read from `TANREN_E2E_MANAGED_ROUTER_KEY`). Under
-  `providerMode: managed` every tenant routes through it, and a fresh stack
-  (`just down-dev -v` wipes the dev Vault) leaves it unseeded — managed mode then
-  hard-fails at credential resolution (correctly; no silent fallback).
+  tenant. There are two:
+  - the **managed-LLM router key** at `credential/openrouter/platform/default`
+    (the manifest's `managed-router` connector, read from
+    `TANREN_E2E_MANAGED_ROUTER_KEY`). Under `providerMode: managed` every tenant
+    routes through it, and a fresh stack (`just down-dev -v` wipes the dev Vault)
+    leaves it unseeded — managed mode then hard-fails at credential resolution
+    (correctly; no silent fallback);
+  - the **proof-substrate signing key** at
+    `credential/proof-substrate/platform/ed25519-signing-key` — the single ed25519
+    identity every proof bundle is sealed under. Without it the substrate refuses
+    to seal (`ProofSigningKeyUnavailableError`) and autonomous merges lose their
+    audit trail.
 
 Seed the platform refs with the sanctioned hosting seeder:
 
 ```sh
-just seed-platform-creds
+just seed-platform-creds                        # both refs
+just seed-platform-creds "" proof-signing-key   # only the named ref(s)
 ```
 
-It resolves `TANREN_E2E_MANAGED_ROUTER_KEY`, writes the platform ref into the
-configured secret store (`scripts/dev/seed-platform-creds.ts`), is
-**idempotent**, and **fails loud** (a typed `MissingSeedSecretError` naming every
-source tried) if no source yields the key — never a silent skip. It is also
-folded into `just up-dev`, so a normal dev bring-up seeds it automatically when
-the key is obtainable (and skips with a notice for a BYOK-only stack). This is
-the deploy-layer's job — kept strictly separate from the tenant credential
-routes; if a future platform-scoped ref is needed on a fresh stack, add it to
-`PLATFORM_REFS` in that seeder (tenant creds stay on the operator API) and to the
-`SEED_SECRET_ALLOWLIST` beside it.
+It writes the platform refs into the configured secret store
+(`scripts/dev/seed-platform-creds.ts`), is **idempotent**, and **fails loud** if a
+ref cannot be provisioned — never a silent skip. It is also folded into
+`just up-dev`: the signing key is seeded unconditionally on every bring-up, and
+the router key is seeded when it is obtainable (a BYOK-only stack gets a notice
+instead). This is the deploy-layer's job — kept strictly separate from the tenant
+credential routes; if a future platform-scoped ref is needed on a fresh stack,
+add it to `PLATFORM_REFS` in that seeder (tenant creds stay on the operator API)
+and to the `SEED_SECRET_ALLOWLIST` beside it.
+
+The two refs differ in **who issues the secret**:
+
+| ref                                                       | name                 | provisioning                                                                                                |
+| --------------------------------------------------------- | -------------------- | ----------------------------------------------------------------------------------------------------------- |
+| `credential/openrouter/platform/default`                  | `managed-router-key` | externally issued — resolved from env (below); absent from every source is a typed `MissingSeedSecretError` |
+| `credential/proof-substrate/platform/ed25519-signing-key` | `proof-signing-key`  | self-provisioned — generated locally when the ref is empty, or supplied via `TANREN_PROOF_SIGNING_KEY`      |
+
+#### Proof-substrate signing key
+
+Nothing external issues this key, so the seeder mints one (ed25519, PKCS#8 PEM)
+the first time and **preserves it thereafter**: a re-run reports `already
+provisioned — left unchanged` and writes nothing. That matters because a sealed
+bundle only verifies while its key survives.
+
+- **Bring your own key** — set `TANREN_PROOF_SIGNING_KEY` to an ed25519 PKCS#8 PEM
+  (useful to share ONE platform identity across stacks, or to inject a key your
+  own secret manager issued). In a dotenv file write it as a single line with `\n`
+  escapes; exported directly, real newlines work. Material that is unparseable or
+  not ed25519 is rejected **before** any write, by the same loader the substrate
+  uses at seal time.
+- **Rotate deliberately** — `TANREN_PROOF_SIGNING_KEY_ROTATE=1` replaces the key.
+  This invalidates verification of every bundle sealed under the old key, so it
+  never happens implicitly; a value stored at the ref that is not usable ed25519
+  material is a hard error rather than an automatic replacement.
+- **Nothing secret is logged.** The seeder prints the ref, the action, and the
+  `ed25519:<sha256-of-public-key>` fingerprint — the same non-invertible
+  `signingKeyId` that already appears in every sealed bundle, so a stack's
+  provisioning log can be matched to a bundle's signer. The private key never
+  reaches stdout or stderr.
+
+In production, provision the same ref through the deployment's secret manager
+instead; the substrate only ever reads it.
 
 #### Managed-router key: portable seeding
 
