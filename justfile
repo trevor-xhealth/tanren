@@ -403,13 +403,18 @@ up-dev: secrets-link runner-key gen-mtls-certs
   echo "up-dev: TANREN_PUBLIC_BASE_URL=$TANREN_PUBLIC_BASE_URL (used by OAuth callbacks + webhook URLs; tracks the orchestrator host port automatically)"; \
   echo "up-dev: TANREN_DOCKER_SOCK=$TANREN_DOCKER_SOCK (allocator runtime socket; auto-detected — docker first, then rootless podman)"; \
   TANREN_RUNNER_AUTHORIZED_KEY="$(cat "$TANREN_RUNTIME_DIR/tanren_runner_key.pub")" docker compose -f compose.dev.yml up -d postgres vault orchestrator worker allocator dashboard runner ntfy registry
-  # Seed PLATFORM-scoped secret-store refs (managed-LLM router key) so a fresh
-  # stack can resolve `providerMode: managed`. The seed SCRIPT resolves the key
-  # via the portable precedence (exported env > TANREN_SECRET_ENV_FILE >
-  # .env.validation.local). Here we replicate that precedence ONLY to decide
-  # whether the key is obtainable at all — a BYOK-only dev stack (no key from any
-  # source) still comes up cleanly by skipping the seed with a notice. When a key
-  # IS present the seed runs and fails loud on any real error.
+  # Seed PLATFORM-scoped secret-store refs so a fresh stack is usable. The
+  # proof-substrate signing key is SELF-PROVISIONED and unconditional: every stack
+  # needs it or the substrate refuses to seal proof bundles, so it is seeded on its
+  # own first (idempotent — an existing key is preserved, never rotated).
+  #
+  # The managed-LLM router key is externally issued, so it is seeded only when
+  # obtainable. The seed SCRIPT resolves it via the portable precedence (exported
+  # env > TANREN_SECRET_ENV_FILE > .env.validation.local); here we replicate that
+  # precedence ONLY to decide whether the key exists at all — a BYOK-only dev stack
+  # still comes up cleanly with a notice. When a key IS present the seed runs and
+  # fails loud on any real error.
+  just seed-platform-creds "" proof-signing-key
   key=""; \
   if [ -n "${TANREN_E2E_MANAGED_ROUTER_KEY:-}" ]; then \
     key="present-exported"; \
@@ -466,11 +471,23 @@ stack-reset:
   fi
 
 # Hosting/boot seeder for PLATFORM-scoped secret-store refs (deploy-layer config,
-# NOT a tenant/userland credential route). Seeds the managed-LLM router key at
-# `credential/openrouter/platform/default` so `providerMode: managed` runs can
-# resolve it; a fresh `down-dev -v` wipes the dev Vault, leaving that ref unseeded
-# and managed mode hard-failing (correctly, no silent fallback). Idempotent and
-# fail-LOUD (`MissingSeedSecretError`) if NO source yields the key.
+# NOT a tenant/userland credential route). A fresh `down-dev -v` wipes the dev
+# Vault, leaving these refs unseeded. Two refs, seeded by NAME:
+#
+#   managed-router-key — the managed-LLM router key at
+#     `credential/openrouter/platform/default`, so `providerMode: managed` runs can
+#     resolve it. Externally issued: fail-LOUD (`MissingSeedSecretError`) if NO
+#     source yields it (managed mode hard-fails without it — no silent fallback).
+#   proof-signing-key  — the proof substrate's ed25519 seal identity at
+#     `credential/proof-substrate/platform/ed25519-signing-key`. SELF-PROVISIONED:
+#     generated here when the ref is empty (or supplied via
+#     `TANREN_PROOF_SIGNING_KEY` as PKCS#8 PEM). Without it the substrate refuses to
+#     seal and autonomous merges lose their proof trail. NEVER rotated implicitly —
+#     an existing key is preserved; set `TANREN_PROOF_SIGNING_KEY_ROTATE=1` to
+#     replace it deliberately (which invalidates verification of prior bundles).
+#
+# Pass ref NAMES as trailing args to seed a subset (`just seed-platform-creds ""
+# proof-signing-key`); with no names it seeds both. Idempotent either way.
 #
 # PORTABLE key resolution (implemented in scripts/dev/seed-platform-creds.ts, so
 # `just seed-platform-creds` and `just up-dev` behave identically):
@@ -493,12 +510,12 @@ stack-reset:
 #
 # `env_file` (optional arg) sets TANREN_SECRET_ENV_FILE for this run; if already
 # exported in the shell env it passes through unchanged when the arg is empty.
-seed-platform-creds env_file="":
+seed-platform-creds env_file="" *refs:
   TANREN_SECRET_ENV_FILE="{{ if env_file != "" { env_file } else { env_var_or_default("TANREN_SECRET_ENV_FILE", "") } }}" \
     TANREN_SECRET_STORE=vault \
     VAULT_ADDR="${TANREN_SEED_VAULT_ADDR:-http://127.0.0.1:18200}" \
     VAULT_TOKEN="${TANREN_SEED_VAULT_TOKEN:-dev-root-token}" \
-    corepack pnpm exec tsx scripts/dev/seed-platform-creds.ts
+    corepack pnpm exec tsx scripts/dev/seed-platform-creds.ts {{ refs }}
 
 # Preflight for an apex (or any dev-stack) run from this cwd. Verifies the
 # canonical secrets layout is intact, required keys are present in `.env`,

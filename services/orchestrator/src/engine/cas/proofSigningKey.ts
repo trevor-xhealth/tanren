@@ -66,19 +66,21 @@ export function deriveSigningKeyId(publicKey: KeyObject): string {
 }
 
 /**
- * Resolve + validate the platform ed25519 signing key from the store. Throws
- * `ProofSigningKeyUnavailableError` when absent (fail-loud, never sign-with-nothing)
- * and `ProofSigningKeyMalformedError` when the material is unparseable or not
- * ed25519.
+ * Parse + validate raw PKCS#8 PEM material as the platform ed25519 signing key.
+ * Throws `ProofSigningKeyMalformedError` when unparseable or not ed25519 — the
+ * SINGLE definition of "acceptable proof-signing material".
+ *
+ * Exported so a PROVISIONER (the platform-credential seeder,
+ * `scripts/dev/seed-platform-creds.ts`) validates candidate material against the
+ * exact same rule the substrate enforces at seal time, BEFORE writing it to the
+ * secret store — an operator learns their key is unusable at provisioning time,
+ * not at the first merge. This is validation only: nothing here generates key
+ * material, so the substrate itself still NEVER auto-generates a key.
  */
-export async function resolveSigningKey(secrets: SecretStore, ref: string): Promise<ResolvedSigningKey> {
-  const secret = await secrets.get(ref);
-  if (secret === undefined || secret.value.trim() === "") {
-    throw new ProofSigningKeyUnavailableError(ref);
-  }
+export function loadEd25519SigningKey(pem: string, ref: string): ResolvedSigningKey {
   let privateKey: KeyObject;
   try {
-    privateKey = createPrivateKey(secret.value);
+    privateKey = createPrivateKey(pem);
   } catch (error) {
     throw new ProofSigningKeyMalformedError(ref, error instanceof Error ? error.message : "unparseable private key");
   }
@@ -90,4 +92,18 @@ export async function resolveSigningKey(secrets: SecretStore, ref: string): Prom
   }
   const publicKey = createPublicKey(privateKey);
   return { privateKey, publicKey, signingKeyId: deriveSigningKeyId(publicKey) };
+}
+
+/**
+ * Resolve + validate the platform ed25519 signing key from the store. Throws
+ * `ProofSigningKeyUnavailableError` when absent (fail-loud, never sign-with-nothing)
+ * and `ProofSigningKeyMalformedError` when the material is unparseable or not
+ * ed25519.
+ */
+export async function resolveSigningKey(secrets: SecretStore, ref: string): Promise<ResolvedSigningKey> {
+  const secret = await secrets.get(ref);
+  if (secret === undefined || secret.value.trim() === "") {
+    throw new ProofSigningKeyUnavailableError(ref);
+  }
+  return loadEd25519SigningKey(secret.value, ref);
 }
