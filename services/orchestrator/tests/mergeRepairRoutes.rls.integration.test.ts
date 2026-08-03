@@ -107,10 +107,21 @@ describeDb("mq-10 autonomous-repair router under tanren_app RLS", () => {
     router = new PgAutonomousRepairRouter({ pool: appPool, events: new PgEventStore(appPool) });
   });
 
+  // DROP the per-run database, like every other rls-integration sibling. This file
+  // only closed its pools, which was invisible while it ran in no gate at all — now
+  // that it is wired into `just smoke-rls-merge-repair-routes` it would otherwise
+  // leak one `tanren_mq10_*` database per CI run, forever.
   afterAll(async () => {
     await appPool?.end();
     await ownerPool?.end();
-  });
+    const admin = new Pool({ connectionString: ADMIN_URL });
+    await admin.query(
+      "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = $1 AND pid <> pg_backend_pid()",
+      [database],
+    );
+    await admin.query(`DROP DATABASE IF EXISTS ${database}`);
+    await admin.end();
+  }, 30_000);
 
   it("routes a first deterministic-policy failure to in-place repair (durable row)", async () => {
     const outcome = await router.routeMemberFailure({
