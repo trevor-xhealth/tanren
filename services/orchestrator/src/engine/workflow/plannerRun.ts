@@ -319,7 +319,7 @@ export async function runPlannerLoopWorkflow(rawInput: RunPlannerLoopInput): Pro
     // MANAGED real-`usage.cost` capturer; BYOK has no platform metering ref (apex v30).
     const captureRealProviderCost = await resolveManagedCapturer(input, appendEvent);
     // The deterministic gate on the just-bootstrapped workspace (tanren-ci.yml or default).
-    const runGate = input.runGate ?? buildDefaultGate(input, allocation.target, workspacePath, eventStore);
+    const runGate = input.runGate ?? buildDefaultGate(input, allocation.target, workspacePath, eventStore, baseSha);
     // Native merge-gate context: the authority runs `runGate` at `pre_merge` + publishes `tanren/gate`.
     const mergeGateCtx: MergeGateRunContext = { runGate, target: allocation.target, workspacePath, eventStore };
 

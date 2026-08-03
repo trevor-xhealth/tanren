@@ -40,6 +40,7 @@ import {
 } from "../workspace/index.js";
 import {
   advisoryStepNamesForPosture,
+  assertGateContractNotWeakened,
   type GateOutcome,
   resolveBootstrapCommand,
   resolveGateConfig,
@@ -260,6 +261,13 @@ async function gateClonedRef(
   headSha: string,
 ): Promise<GateOutcome> {
   const config = await resolveGateConfig({ ssh: deps.ssh, target, workspacePath });
+  // GATE-CONTRACT RATCHET (defense in depth at the merge authority itself). This clone is a
+  // FULL one, so the baseline anchor is discovered without plumbing: `origin/HEAD` names the
+  // remote's own default branch and the merge-base with it is where this ref diverged. A ref
+  // whose contract demands less than that throws, and the caller maps a throw to a non-pass —
+  // so an unverified weakening can never be the thing that authorizes its own merge. A
+  // workspace with no discoverable anchor skips (see gate/contractRatchet.ts).
+  await assertGateContractNotWeakened({ ssh: deps.ssh, target, workspacePath, headConfig: config });
   return runGateForWhen({
     ssh: deps.ssh,
     target,

@@ -30,5 +30,18 @@ export {
   upgradeCommand,
 } from "./resolve.js";
 
+// The GATE-CONTRACT RATCHET: a run may strengthen the contract that judges it, never weaken
+// it. Pure comparison over two resolved configs — no execution, no I/O.
+export {
+  GateContractBaselineError,
+  GateContractWeakenedError,
+  type GateStrengthProfile,
+  type GateWeakening,
+  RATCHETED_GATE_POINTS,
+  describeGateWeakening,
+  detectGateWeakening,
+  gateStrengthProfile,
+} from "./ratchet.js";
+
 export { parseYaml } from "./yaml.js";
 export type { YamlValue } from "./yaml.js";

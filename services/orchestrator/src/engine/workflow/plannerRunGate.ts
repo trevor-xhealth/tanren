@@ -12,6 +12,7 @@ import type { EventName, EventPayload } from "../events/index.js";
 import type { EventStore } from "../eventStore.js";
 import {
   advisoryStepNamesForPosture,
+  gateContractRatchetFailure,
   type GateOutcome,
   ingestGateJunit,
   invalidCiConfigGateOutcome,
@@ -20,9 +21,10 @@ import {
   resolveBootstrapCommand,
   resolveGateConfig,
   runGateForWhen,
+  type UnusableCiConfigError,
   workspaceDepsInstallGateOutcome,
 } from "./gate/index.js";
-import type { CiConfigV1, CiConfigValidationError, CiYamlParseError } from "../ci/index.js";
+import type { CiConfigV1 } from "../ci/index.js";
 import type { JunitReport } from "../ci/junit.js";
 import { ensureWorkspaceDepsInstalled, resolveWorkspaceHeadSha } from "../workspace/index.js";
 import { type ActiveQuarantine, loadActiveQuarantine, quarantineEnv } from "./ciQuarantine.js";
@@ -113,6 +115,11 @@ export function buildDefaultGate(
   target: RunnerHandle,
   workspacePath: string,
   eventStore: EventStore,
+  // GATE-CONTRACT RATCHET floor: the run's own base commit (created by workspace bootstrap,
+  // BEFORE the writer ran, so the writer cannot choose it). Present ⇒ the ratchet is enforced
+  // against it and an unreadable floor fails closed; absent ⇒ the anchor is discovered from the
+  // workspace's git shape (see gate/contractRatchet.ts).
+  contractBaselineRevision?: string,
 ): (gate: { when: CiWhen; taskId?: string; headShaOverride?: string }) => Promise<GateOutcome> {
   const context = input.context;
   // The lazily-resolved gate config, memoized as a DISCRIMINATED result so an
@@ -123,9 +130,7 @@ export function buildDefaultGate(
   // finding). A substrate READ failure is NOT classified here — it keeps its loud-
   // throw semantics (a transient hiccup must never be recast as a fixable config
   // finding). Memoized: the result is observed once and reused for the rest of the run.
-  let configResult:
-    | Promise<{ ok: CiConfigV1 } | { invalid: CiConfigValidationError | CiYamlParseError } | undefined>
-    | undefined;
+  let configResult: Promise<{ ok: CiConfigV1 } | { invalid: UnusableCiConfigError } | undefined> | undefined;
   // The lazily-resolved EXPLICIT bootstrap command, cached alongside the config.
   // An explicit input.bootstrapCommand wins; otherwise the writer-authored
   // .tanren/ci.yml `bootstrap.run` (conventionally `just bootstrap`) is picked up.
@@ -192,6 +197,22 @@ export function buildDefaultGate(
       // `.tanren/ci.yml` is invalid"), fail-closed (never a pass). The worker survives.
       return invalidCiConfigGateOutcome(resolved.invalid, when, appendEvent, taskId);
     }
+    // `resolved` is the `{ ok }` branch here (the `{ invalid }` branch returned above; an
+    // `undefined` is impossible since resolveGateConfig always yields a config or throws).
+    const config = (resolved as { ok: CiConfigV1 }).ok;
+    const weakened = await gateContractRatchetFailure({
+      ssh: input.ssh,
+      target,
+      workspacePath,
+      headConfig: config,
+      baselineRevision: contractBaselineRevision,
+      when,
+      appendEvent,
+      taskId,
+    });
+    if (weakened !== undefined) {
+      return weakened;
+    }
     if (installCommandPromise === undefined) {
       // Resolve the EXPLICIT install command, if any: an `input.bootstrapCommand`
       // override wins; otherwise the repo's `.tanren/ci.yml` `bootstrap.run`
@@ -249,10 +270,6 @@ export function buildDefaultGate(
       }
       throw error;
     }
-    // `resolved` is the `{ ok }` branch here (the `{ invalid }` branch returned above;
-    // an `undefined` is impossible since resolveGateConfig always yields a config or
-    // throws). Narrow to the parsed config for the tier run.
-    const config = (resolved as { ok: CiConfigV1 }).ok;
     // Anchor the native verdict on the commit the gate is about to verify. COMMIT-BINDING
     // (§5): the `pre_merge` gate passes a `headShaOverride` — the PUSHED PR head (the
     // cleaned ref, bootstrap commit dropped) — because the workspace HEAD is left at the
