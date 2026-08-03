@@ -2,7 +2,8 @@
 // Drives the REAL route handlers against the in-memory RoutesPool + an injected
 // fetch, proving the user experience without a raw config PATCH:
 //   - connect via App install → GET reflects mode:"app" + a SERVER-stamped
-//     installedAt + a real capability check (administration:write → canCreateRepos);
+//     installedAt + a real capability check over the installation's GRANTED
+//     permission set (run-fatal gaps vs optional ones);
 //   - connect via token → the PAT is stored + set as the org default, and the
 //     capability reflects the token's actual X-OAuth-Scopes;
 //   - onboarding-status aggregates AI provider + GitHub + budget into ready/nextSteps;
@@ -56,9 +57,31 @@ const member: ActorContext = {
 interface CapabilityFetchOptions {
   /** The GitHub App installation's granted `administration` permission. */
   administration?: string;
+  /**
+   * The installation's FULL granted permission map, exactly as
+   * `GET /app/installations/{id}` returns it. Supplied when a test needs to model
+   * a real-world partial grant (rather than only varying `administration`).
+   */
+  permissions?: Record<string, string>;
   /** The classic OAuth scopes the static token reports via X-OAuth-Scopes. */
   tokenScopes?: string;
 }
+
+/**
+ * The permission set a fully-provisioned Tanren GitHub App installation carries —
+ * every permission Tanren depends on, at the level it needs. Used as the default
+ * so the pre-existing tests keep exercising a healthy install, and as the positive
+ * guard proving the probe does NOT warn when nothing is missing.
+ */
+const FULL_PERMISSIONS: Record<string, string> = {
+  administration: "write",
+  contents: "write",
+  issues: "write",
+  metadata: "read",
+  pull_requests: "write",
+  repository_hooks: "write",
+  statuses: "write",
+};
 
 /**
  * A URL-routing fake fetch covering the three endpoints the routes hit:
@@ -77,13 +100,11 @@ function buildFetch(opts: CapabilityFetchOptions = {}): typeof fetch {
       );
     }
     if (/\/app\/installations\/[^/]+$/u.test(url) && method === "GET") {
-      return new Response(
-        JSON.stringify({
-          account: { login: "acme-org" },
-          permissions: { administration: opts.administration ?? "read", contents: "write" },
-        }),
-        { status: 200 },
-      );
+      // Default to a fully-provisioned install, then apply the test's overrides:
+      // an explicit `permissions` map replaces it wholesale (modelling a real
+      // partial grant), while `administration` varies only that one permission.
+      const permissions = opts.permissions ?? { ...FULL_PERMISSIONS, administration: opts.administration ?? "read" };
+      return new Response(JSON.stringify({ account: { login: "acme-org" }, permissions }), { status: 200 });
     }
     if (url.endsWith("/user") && method === "GET") {
       return new Response(JSON.stringify({ login: "acme-bot" }), {
@@ -184,12 +205,93 @@ describe("connect GitHub — App install mode", () => {
     });
   });
 
-  it("reports the administration:write gap when the App lacks it", async () => {
+  // The OPPOSITE classification: an install missing ONLY administration:write can
+  // still complete every run (it just cannot create a greenfield repo), so the gap
+  // is reported as feature-blocking and `runReady` stays true.
+  it("reports the administration:write gap as feature-blocking, keeping the install run-ready", async () => {
     const { app } = await buildHarness({ administration: "read" });
     await reqJson(app, "POST", "/orgs/org_acme/github", { installationId: "987", appId: "123456" });
     const get = await reqJson(app, "GET", "/orgs/org_acme/github");
     expect(get.body.canCreateRepos).toBe(false);
+    expect(get.body.runReady).toBe(true);
+    expect(get.body.canPublishGateStatus).toBe(true);
+    expect(get.body.blockingPermissions).toEqual([]);
     expect(get.body.missingPermissions).toEqual(["administration:write"]);
+    expect(get.body.permissionGaps).toMatchObject([
+      { permission: "administration:write", severity: "feature_blocking" },
+    ]);
+
+    // …and onboarding lists it as an ADVISORY, not a step that holds back `ready`.
+    const status = await reqJson(app, "GET", "/orgs/org_acme/onboarding-status");
+    expect(status.body.nextSteps).not.toContainEqual(expect.stringContaining("administration:write"));
+    expect(status.body.advisories).toContainEqual(expect.stringContaining("administration:write"));
+  });
+
+  // NEGATIVE CONTROL (the false-green defect). A real installation granted only
+  // `contents:write, metadata:read, pull_requests:write` reported connected + a
+  // single OPTIONAL `administration:write` gap — while EVERY run died at gate
+  // publish, because `POST /repos/{o}/{r}/statuses/{sha}` 403s without
+  // `statuses:write` and `githubPublishCheck.ts` throws on any non-201. The probe
+  // must name the run-fatal gap, must not call the connection run-ready, and the
+  // readiness checklist must hold `ready` false on it.
+  it("reports the run-fatal statuses:write gap for a contents+metadata+pull_requests install", async () => {
+    const { app, pool } = await buildHarness({
+      permissions: { contents: "write", metadata: "read", pull_requests: "write" },
+    });
+    // Everything ELSE an org needs is configured, so `ready` can only be held
+    // false by the GitHub permission gap.
+    pool.orgs.get("org_acme")!.config = {
+      version: 1,
+      providerMode: "managed",
+      defaultBudget: { ceilingUsd: 50, period: "monthly" },
+    };
+    await reqJson(app, "POST", "/orgs/org_acme/github", { installationId: "987", appId: "123456" });
+    const get = await reqJson(app, "GET", "/orgs/org_acme/github");
+
+    expect(get.status).toBe(200);
+    // A credential IS configured and GitHub confirms the identity — `connected`
+    // stays factual; the readiness signal is what must go red.
+    expect(get.body.connected).toBe(true);
+    expect(get.body.runReady).toBe(false);
+    expect(get.body.canPublishGateStatus).toBe(false);
+    // The run-fatal gap is named, and separated from the optional/feature gaps.
+    expect(get.body.blockingPermissions).toEqual(["statuses:write"]);
+    const gaps = get.body.permissionGaps as { permission: string; severity: string; blocks: string }[];
+    expect(gaps.find((gap) => gap.permission === "statuses:write")).toMatchObject({ severity: "run_fatal" });
+    // `administration:write`, `issues:write` and `repository_hooks:write` are
+    // absent too, and likewise reported — as feature-blocking, not run-fatal.
+    expect(get.body.missingPermissions).toEqual([
+      "statuses:write",
+      "administration:write",
+      "issues:write",
+      "repository_hooks:write",
+    ]);
+
+    const status = await reqJson(app, "GET", "/orgs/org_acme/onboarding-status");
+    expect(status.body.ready).toBe(false);
+    expect(status.body.github).toEqual({ connected: true, runReady: false, canCreateRepos: false });
+    expect(status.body.nextSteps).toEqual([expect.stringContaining("statuses:write")]);
+    expect(status.body.nextSteps[0]).toContain("EVERY run fails");
+  });
+
+  // POSITIVE GUARD: an install that genuinely holds every permission must report
+  // healthy, so an "always warns" probe cannot masquerade as a fix.
+  it("reports an install holding every permission as run-ready with no gaps", async () => {
+    const { app } = await buildHarness({ permissions: FULL_PERMISSIONS });
+    await reqJson(app, "POST", "/orgs/org_acme/github", { installationId: "987", appId: "123456" });
+    const get = await reqJson(app, "GET", "/orgs/org_acme/github");
+
+    expect(get.body).toMatchObject({
+      connected: true,
+      mode: "app",
+      login: "acme-org",
+      runReady: true,
+      canPublishGateStatus: true,
+      canCreateRepos: true,
+    });
+    expect(get.body.missingPermissions).toEqual([]);
+    expect(get.body.blockingPermissions).toEqual([]);
+    expect(get.body.permissionGaps).toEqual([]);
   });
 
   it("rejects an appId that does not match the credential", async () => {
@@ -265,7 +367,11 @@ describe("GET github — not connected", () => {
       connected: false,
       mode: null,
       login: null,
+      runReady: false,
+      canPublishGateStatus: false,
       canCreateRepos: false,
+      permissionGaps: [],
+      blockingPermissions: [],
       missingPermissions: [],
     });
   });
@@ -303,7 +409,7 @@ describe("onboarding-status", () => {
     expect(empty.status).toBe(200);
     expect(empty.body.ready).toBe(false);
     expect(empty.body.aiProvider).toEqual({ connected: false });
-    expect(empty.body.github).toEqual({ connected: false, canCreateRepos: false });
+    expect(empty.body.github).toEqual({ connected: false, runReady: false, canCreateRepos: false });
     expect(empty.body.budget).toEqual({ ceilingUsd: null });
     expect(empty.body.nextSteps.length).toBe(3);
 
@@ -321,7 +427,7 @@ describe("onboarding-status", () => {
     const ready = await reqJson(app2, "GET", "/orgs/org_acme/onboarding-status");
     expect(ready.body.ready).toBe(true);
     expect(ready.body.aiProvider).toEqual({ connected: true, classifiedAs: "codex" });
-    expect(ready.body.github).toEqual({ connected: true, canCreateRepos: true });
+    expect(ready.body.github).toEqual({ connected: true, runReady: true, canCreateRepos: true });
     expect(ready.body.budget).toEqual({ ceilingUsd: 50 });
     expect(ready.body.nextSteps).toEqual([]);
   });
@@ -356,7 +462,7 @@ describe("onboarding-status", () => {
     await reqJson(app, "POST", "/orgs/org_acme/github", { token: "ghp_no_repo_scope" });
     const status = await reqJson(app, "GET", "/orgs/org_acme/onboarding-status");
     expect(status.body.ready).toBe(false);
-    expect(status.body.github).toEqual({ connected: true, canCreateRepos: false });
+    expect(status.body.github).toEqual({ connected: true, runReady: false, canCreateRepos: false });
     expect(status.body.nextSteps.some((s: string) => s.includes("repo"))).toBe(true);
   });
 
@@ -368,7 +474,7 @@ describe("onboarding-status", () => {
     const status = await reqJson(app, "GET", "/orgs/org_acme/onboarding-status");
     expect(status.body.ready).toBe(false);
     expect(status.body.aiProvider).toEqual({ connected: true, classifiedAs: "managed" });
-    expect(status.body.github).toEqual({ connected: true, canCreateRepos: true });
+    expect(status.body.github).toEqual({ connected: true, runReady: true, canCreateRepos: true });
     expect(status.body.budget).toEqual({ ceilingUsd: null });
     expect(status.body.nextSteps).toEqual([
       "Set a default budget ceiling: PUT /orgs/:orgId/budget so runs have a spend cap.",

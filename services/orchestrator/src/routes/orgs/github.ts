@@ -4,12 +4,12 @@
 // hand-craft a raw `PATCH /orgs/:orgId` config with a `github_app` block
 // (including an `installedAt` timestamp) or hand-set a `defaultCredentials`
 // credential ref — nothing a real user does — and there is NO way to learn, up
-// front, whether the connected identity can actually CREATE repos (greenfield
-// needs `administration:write`), so greenfield fails late with a 403.
+// front, whether the connected identity holds the permissions Tanren needs, so
+// runs fail late with a 403.
 //
 //   POST /orgs/:orgId/github          — connect GitHub (App install OR token).
 //   GET  /orgs/:orgId/github          — the connected identity + its CAPABILITIES
-//                                       (real check: canCreateRepos + missing).
+//                                       (real check: runReady + classified gaps).
 //   GET  /orgs/:orgId/onboarding-status — the single readiness checklist.
 //
 // Org-scoped under RLS (the scoped pool); the writes require org-admin. The
@@ -29,7 +29,13 @@ import {
 } from "../../engine/config/orgConfig.js";
 import type { SecretStore } from "../../engine/contracts/secretStore.js";
 import { loadGithubAppCredential } from "../../engine/credentials/githubApp.js";
-import { probeGithubAppCapability, probeGithubTokenCapability } from "../../engine/credentials/githubCapability.js";
+import {
+  describeGithubPermissionGap,
+  probeGithubAppCapability,
+  probeGithubTokenCapability,
+  UNCONNECTED_GITHUB_CAPABILITY,
+  type GithubCapability,
+} from "../../engine/credentials/githubCapability.js";
 import { storeGithubToken } from "../../engine/credentials/githubToken.js";
 import {
   loadOrgDefaultGithubCredentialRef,
@@ -170,12 +176,17 @@ export function createGithubConnectRoutes(options: GithubConnectRoutesOptions) {
   return app;
 }
 
-interface GithubConnectionStatus {
+/**
+ * The connected-GitHub view. `connected` reports only what it says: an identity
+ * IS configured and GitHub confirms it. It stays true even when a run-fatal
+ * permission is absent — flipping it to false would misstate the fault and
+ * push the operator to re-connect the same identity, when what they must do is
+ * grant a permission. `runReady` is the readiness signal, and it goes red the
+ * moment a run-fatal permission is missing (loud, never a silent degrade).
+ */
+interface GithubConnectionStatus extends GithubCapability {
   connected: boolean;
   mode: "app" | "token" | null;
-  login: string | null;
-  canCreateRepos: boolean;
-  missingPermissions: string[];
 }
 
 /**
@@ -217,7 +228,7 @@ async function resolveGithubConnection(
     return { connected: true, mode: "token", ...capability };
   }
   // No App installation AND no static ref configured: legitimately not connected.
-  return { connected: false, mode: null, login: null, canCreateRepos: false, missingPermissions: [] };
+  return { connected: false, mode: null, ...UNCONNECTED_GITHUB_CAPABILITY };
 }
 
 /**
@@ -372,10 +383,13 @@ interface AiProviderStatus {
 
 interface OnboardingStatus {
   aiProvider: AiProviderStatus;
-  github: { connected: boolean; canCreateRepos: boolean };
+  github: { connected: boolean; runReady: boolean; canCreateRepos: boolean };
   budget: { ceilingUsd: number | null };
   ready: boolean;
+  /** Steps that MUST be done before the org can run; each one keeps `ready` false. */
   nextSteps: string[];
+  /** Optional capabilities that are unavailable; these do NOT hold back `ready`. */
+  advisories: string[];
 }
 
 /**
@@ -395,12 +409,18 @@ function composeOnboardingStatus(
   if (!aiProvider.connected) {
     nextSteps.push("Connect an AI provider: import a Codex credential (or enable managed provider).");
   }
-  if (!github.connected) {
+  // Severity decides which list a permission gap lands in. A `run_fatal` gap is a
+  // BLOCKING next step (no run can finish without it); a `feature_blocking` gap is
+  // an advisory (it costs one optional capability, e.g. greenfield repo creation
+  // or issue-sourced intake, and must not hold a working org out of `ready`).
+  const advisories: string[] = [];
+  if (github.connected) {
+    for (const gap of github.permissionGaps) {
+      const target = gap.severity === "run_fatal" ? nextSteps : advisories;
+      target.push(describeGithubPermissionGap(gap));
+    }
+  } else {
     nextSteps.push("Connect GitHub: POST /orgs/:orgId/github with an App installation or a token.");
-  } else if (!github.canCreateRepos) {
-    nextSteps.push(
-      `Grant repo-creation: the connected GitHub identity is missing ${github.missingPermissions.join(", ")} (required for greenfield).`,
-    );
   }
   if (ceilingUsd === null) {
     nextSteps.push("Set a default budget ceiling: PUT /orgs/:orgId/budget so runs have a spend cap.");
@@ -411,10 +431,11 @@ function composeOnboardingStatus(
   const ready = nextSteps.length === 0;
   return {
     aiProvider,
-    github: { connected: github.connected, canCreateRepos: github.canCreateRepos },
+    github: { connected: github.connected, runReady: github.runReady, canCreateRepos: github.canCreateRepos },
     budget: { ceilingUsd },
     ready,
     nextSteps,
+    advisories,
   };
 }
 

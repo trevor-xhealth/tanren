@@ -16,13 +16,28 @@ the static-token path is used unchanged.
 ## 1. Register the GitHub App (one-time, per deployment)
 
 1. GitHub → **Settings → Developer settings → GitHub Apps → New GitHub App**.
-2. Permissions (repository): **Contents: Read & write**, **Pull requests: Read
-   & write**, **Metadata: Read-only**, **Checks: Read & write**, **Commit
-   statuses: Read & write**, and **Administration: Read & write**. Repository
-   administration write is required for greenfield repo creation via
-   `POST /orgs/:owner/repos`. Organization: **Members: Read-only** (review-gate
-   routing). Do not grant Secrets unless a future feature explicitly requires
-   it.
+2. Permissions (repository). These are **not** interchangeable — the capability
+   probe classifies them by severity, and so should you:
+
+   **Required for every run** (without any one of them, no run can complete):
+   **Commit statuses: Read & write** (Tanren publishes its own `tanren/gate`
+   verdict via `POST /repos/{owner}/{repo}/statuses/{sha}`, and that verdict is
+   the merge authority — a missing grant 403s and kills the run), **Contents:
+   Read & write**, **Pull requests: Read & write**, **Metadata: Read-only**.
+
+   **Optional, per feature:** **Administration: Read & write** — only for
+   greenfield repo creation via `POST /orgs/:owner/repos`; brownfield projects
+   never need it. **Issues: Read & write** and **Webhooks: Read & write** — only
+   for issue-sourced intake (reading tracked issues, syncing comments/state back,
+   and provisioning the repository webhook).
+
+   Organization: **Members: Read-only** (review-gate routing). Do not grant
+   Secrets unless a future feature explicitly requires it.
+
+   After installing, verify with `GET /orgs/:orgId/github`: `runReady` must be
+   `true`. Any `permissionGaps` entry with `severity: "run_fatal"` means runs
+   will fail — `feature_blocking` entries only cost the named optional feature.
+
 3. Set the **Setup / Callback URL** to:
    `https://<orchestrator-public-url>/auth/github-app/callback`
 4. Generate a **private key** (downloads a `.pem`). Note the numeric **App ID**.

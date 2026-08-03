@@ -136,7 +136,8 @@ export function mountFeatureRoutes(app: Hono<ActorContextEnv>, deps: FeatureRout
   app.route("/orgs", createAiProviderRoutes({ pool: scopedPool, secrets, registry: credentialRegistry }));
   // Wave-2 operator API: human-drivable "Connect GitHub" (App install OR token,
   // server-stamped `installedAt`, no raw config PATCH) + the connected identity's
-  // REAL capability check (`canCreateRepos`) + the single onboarding readiness
+  // REAL capability check (`runReady` + severity-classified permission gaps,
+  // read declaratively from the granted permission set) + the onboarding readiness
   // checklist. Org-scoped on the scoped pool; the shared minter caches App tokens.
   // The managed App credential ref (when configured via env) backs an install
   // connect that omits a `credentialRef`.
