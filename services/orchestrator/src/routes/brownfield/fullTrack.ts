@@ -51,8 +51,8 @@ import {
   classifyWorkflowIntents,
   BranchProtectionInput,
   type ConfigInjectionGitHub,
-  type ReconAnswerer,
-  type RepoReader,
+  type ReconTurnAnswerer,
+  type RepoExplorer,
 } from "../../engine/forge/brownfield/index.js";
 import type { ForgeAnswererTarget } from "../../engine/forge/providerFactory.js";
 import { createGitHubIssuesConnector } from "../../engine/forge/inbox/githubConnector.js";
@@ -78,10 +78,10 @@ export interface BrownfieldFullTrackOptions {
   // so the answerer resolves THAT project's `forge` routing. Production passes
   // `buildForgeReconAnswererFactory` (a real provider answerer); tests pass a
   // fake. REQUIRED — there is no deterministic fallback.
-  reconAnswererFactory: (target: ForgeAnswererTarget) => ReconAnswerer;
+  reconAnswererFactory: (target: ForgeAnswererTarget) => ReconTurnAnswerer;
   // Test seams: override the repo reader / config-injection GitHub / issue
   // fetch so the routes are exercised without network.
-  repoReaderFor?: (repoUrl: string, defaultBranch: string, resolved: ResolvedGithubToken) => RepoReader;
+  repoReaderFor?: (repoUrl: string, defaultBranch: string, resolved: ResolvedGithubToken) => RepoExplorer;
   configInjectionGithubFor?: (resolved: ResolvedGithubToken) => ConfigInjectionGitHub;
   fetchIssues?: (repoUrl: string, projectId: string) => Promise<IngestedItem[]>;
 }
@@ -141,9 +141,9 @@ export function createBrownfieldFullTrackRoutes(options: BrownfieldFullTrackOpti
           resolved,
           defaultBranch: guard.defaultBranch,
         });
-      const { index, report } = await runRecon(
+      const { index, report, exploration } = await runRecon(
         {
-          reader,
+          explorer: reader,
           answerer: options.reconAnswererFactory({ orgId: guard.orgId, projectId: c.req.param("projectId") }),
         },
         parsed.data.repoUrl,
@@ -154,7 +154,24 @@ export function createBrownfieldFullTrackRoutes(options: BrownfieldFullTrackOpti
         repoUrl: guard.repoUrl,
         report,
       });
-      return c.json({ repoUrl: guard.repoUrl, filesIndexed: index.filesIndexed, report, state }, 200);
+      // The exploration summary rides back with the report so the operator can
+      // SEE what the recon cost — how many turns it took, how much of the repo it
+      // actually read, and whether it finished or was asked to stop.
+      return c.json(
+        {
+          repoUrl: guard.repoUrl,
+          filesIndexed: index.filesIndexed,
+          report,
+          state,
+          exploration: {
+            turns: exploration.turns.length,
+            filesRead: exploration.filesRead,
+            bytesRead: exploration.bytesRead,
+            endedBy: exploration.endedBy,
+          },
+        },
+        200,
+      );
     } catch (error) {
       return c.json({ error: "recon_failed", message: messageOf(error) }, 502);
     }

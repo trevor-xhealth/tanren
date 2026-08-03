@@ -56,6 +56,11 @@ export class TreeServingGitHubClient implements GitHubHttpClient {
         .map((segment) => decodeURIComponent(segment))
         .join("/");
       this.contentReads.push(path);
+      // A path that is not in the tree 404s, exactly as GitHub's contents API
+      // does. Serving content for ANY requested path would let a suite "read" a
+      // file the repository does not contain — and would let an exploring recon
+      // treat an endless stream of invented paths as endless new evidence.
+      if (!this.treePaths.includes(path)) return { status: 404, body: {} };
       return {
         status: 200,
         body: { encoding: "utf-8", content: this.bodyFor(path) },

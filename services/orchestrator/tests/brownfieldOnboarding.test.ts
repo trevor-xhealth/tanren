@@ -1,8 +1,11 @@
 // brownfield onboarding (full track) engine tests.
 //
 // Exercises the four engine pieces with MOCKED seams (no provider, no network):
-//   - recon: a fake `RepoReader` + a mocked `ReconAnswerer` pre-fill chapters,
-//     plus the deterministic answerer derives chapters from the repo index.
+//   - recon: a fake `RepoExplorer` + a mocked `ReconTurnAnswerer` pre-fill
+//     chapters, plus the deterministic answerer derives chapters from the repo
+//     index. (The EXPLORATION loop itself — reaching a file the entry-point budget
+//     excludes, and terminating when nothing more is worth reading — is
+//     `brownfieldReconReach.test.ts`, which drives the REAL reader.)
 //   - config-injection: `proposeConfigFiles` builds the integration files (incl. the
 //     stack-agnostic justfile skeleton when the repo ships none) + honors per-file
 //     exclude; `openConfigInjectionPr` opens a PR through a fake `ConfigInjectionGitHub`
@@ -26,10 +29,10 @@ import {
   seedDagFromReconAndIssues,
   type ConfigInjectionGitHub,
   type InjectedConfigPullRequest,
-  type ReconAnswerer,
   type ReconIndex,
   type ReconReport,
-  type RepoReader,
+  type ReconTurnAnswerer,
+  type RepoExplorer,
 } from "../src/engine/forge/brownfield/index.js";
 import { resolveCiConfig } from "../src/engine/ci/index.js";
 import { createDeterministicReconAnswerer } from "./fixtures/forge/deterministicReconAnswerer.js";
@@ -43,10 +46,14 @@ const actor: ActorContext = {
   source: "session",
 };
 
-function fakeReader(index: ReconIndex): RepoReader {
+/** An explorer over a fixed index that has nothing further to offer. */
+function fakeExplorer(index: ReconIndex): RepoExplorer {
   return {
     async index() {
       return index;
+    },
+    async explore(_repoUrl, request) {
+      return { request, outcome: "not_found", body: "", total: 0, covered: 0 };
     },
   };
 }
@@ -81,14 +88,19 @@ const SAMPLE_REPORT: ReconReport = {
 describe("runRecon · read-only recon pre-fills chapters", () => {
   it("uses a mocked answerer over the indexed repo", async () => {
     let sawIndex: ReconIndex | undefined;
-    const answerer: ReconAnswerer = {
-      async read(index) {
-        sawIndex = index;
-        return SAMPLE_REPORT;
+    const answerer: ReconTurnAnswerer = {
+      async turn(input) {
+        sawIndex = input.index;
+        return { status: "report", notes: "", requests: [], report: SAMPLE_REPORT };
       },
     };
-    const { index, report } = await runRecon({ reader: fakeReader(SAMPLE_INDEX), answerer }, SAMPLE_INDEX.repoUrl);
+    const { index, report, exploration } = await runRecon(
+      { explorer: fakeExplorer(SAMPLE_INDEX), answerer },
+      SAMPLE_INDEX.repoUrl,
+    );
     expect(sawIndex?.filesIndexed).toBe(3);
+    // Reported on its first turn: no exploration turns, nothing read.
+    expect(exploration).toEqual({ turns: [], filesRead: 0, bytesRead: 0, endedBy: "reported" });
     expect(index.repoUrl).toBe(SAMPLE_INDEX.repoUrl);
     expect(report.identity.slug).toBe("tanren-fixture-easy");
     expect(report.gaps).toHaveLength(2);
@@ -96,7 +108,7 @@ describe("runRecon · read-only recon pre-fills chapters", () => {
 
   it("deterministic answerer derives chapters + flags missing integration files", async () => {
     const { report } = await runRecon(
-      { reader: fakeReader(SAMPLE_INDEX), answerer: createDeterministicReconAnswerer() },
+      { explorer: fakeExplorer(SAMPLE_INDEX), answerer: createDeterministicReconAnswerer() },
       SAMPLE_INDEX.repoUrl,
     );
     expect(report.identity.slug).toBe("tanren-fixture-easy");
@@ -108,8 +120,9 @@ describe("runRecon · read-only recon pre-fills chapters", () => {
 
   it("deterministic answerer is what createDeterministicReconAnswerer returns", async () => {
     const answerer = createDeterministicReconAnswerer();
-    const report = await answerer.read(SAMPLE_INDEX);
-    expect(report.personas.length).toBeGreaterThan(0);
+    const turn = await answerer.turn({ index: SAMPLE_INDEX, observations: [], notes: "", finalize: false });
+    expect(turn.status).toBe("report");
+    expect(turn.report?.personas.length).toBeGreaterThan(0);
   });
 });
 

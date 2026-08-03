@@ -33,7 +33,7 @@ import { loadOrgRunnerContext, loadProjectRunnerContext } from "./runnerContext.
 import { wrapProviderInterviewAnswerer, type InterviewAnswerer } from "./interview/index.js";
 import { wrapProviderDiscoveryAnswerer, type DiscoveryAnswerer, type DiscoveryResult } from "./discovery/index.js";
 import { wrapProviderTriageAnswerer, type TriageAnswerer, type CandidateTriage } from "./inbox/index.js";
-import { wrapProviderReconAnswerer, type ReconAnswerer, type ReconReport } from "./brownfield/index.js";
+import { wrapProviderReconAnswerer, type ReconTurn, type ReconTurnAnswerer } from "./brownfield/index.js";
 import { wrapProviderSpecQualityAnswerer, type SpecQualityAnswerer } from "./specQuality/index.js";
 import type { SpecQualityAnswer, SpecRevisionAnswer } from "../answerers/schemas/specQuality.js";
 import { wrapProviderAuditAnswerer, type AuditAnswerer, type AuditPassReport } from "./audits/index.js";
@@ -199,8 +199,8 @@ export function buildForgeSpecQualityAnswererFactory(
 /** Build a production brownfield-recon answerer factory (project/org-scoped). */
 export function buildForgeReconAnswererFactory(
   infra: ForgeAnswererInfra,
-): (target: ForgeAnswererTarget) => ReconAnswerer {
-  return (target) => wrapProviderReconAnswerer(forgeAllocatingAnswererAdapter<ReconReport>(infra, target));
+): (target: ForgeAnswererTarget) => ReconTurnAnswerer {
+  return (target) => wrapProviderReconAnswerer(forgeAllocatingAnswererAdapter<ReconTurn>(infra, target));
 }
 
 /** Build a production scheduled-audit answerer factory (project-scoped). */

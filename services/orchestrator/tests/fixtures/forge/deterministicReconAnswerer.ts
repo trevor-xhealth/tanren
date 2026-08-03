@@ -5,14 +5,20 @@
 // derives a plausible recon report from the repo index using cheap, observable
 // signals (file paths, dependency manifests, the presence/absence of the
 // integration files). Production wraps a provider read-only Answerer instead;
-// tests inject a fake. All three implement the same `ReconAnswerer` seam.
+// tests inject a fake. All three implement the same `ReconTurnAnswerer` seam.
+//
+// It reports on its FIRST turn and never explores: with no model to reason with,
+// there is nothing it could do with a file it asked for. That is a legitimate
+// (degenerate) exploration — one turn, converged — not a special case in the loop.
 
 import type {
-  ReconAnswerer,
   ReconArchitectureLine,
   ReconIndex,
   ReconReport,
   ReconRisk,
+  ReconTurn,
+  ReconTurnAnswerer,
+  ReconTurnInput,
 } from "../../../src/engine/forge/brownfield/types.js";
 
 function slugFromRepoUrl(repoUrl: string): string {
@@ -68,63 +74,67 @@ function detectRisks(index: ReconIndex): ReconRisk[] {
  * Build the deterministic recon Answerer. The report is derived purely from the
  * repo index so it is reproducible and provider-free.
  */
-export function createDeterministicReconAnswerer(): ReconAnswerer {
+export function createDeterministicReconAnswerer(): ReconTurnAnswerer {
   return {
-    async read(index: ReconIndex): Promise<ReconReport> {
-      const slug = slugFromRepoUrl(index.repoUrl);
-      const architecture = detectArchitecture(index);
-      const risks = detectRisks(index);
-      return {
-        identity: {
-          slug,
-          purpose: `linked repository ${slug} (recon-inferred)`,
-          inferredFrom: index.files.some((f) => f.path.toLowerCase() === "readme.md")
-            ? "README.md · package.json"
-            : "repo layout",
-        },
-        personas: [
-          {
-            name: "developer · maintainer",
-            description: "maintains the codebase and reviews changes",
-            inferredFrom: "no other user roles found in code",
-          },
-        ],
-        behaviors: [
-          {
-            persona: "developer · maintainer",
-            title: "build & test the project",
-            inferredFrom: "ci workflows",
-          },
-          {
-            persona: "developer · maintainer",
-            title: "review incoming changes",
-            inferredFrom: "branch protection",
-          },
-        ],
-        architecture,
-        risks,
-        gaps: [
-          {
-            id: "design-dna",
-            chapter: "design dna",
-            question: "The repo has no clear design system. Default to industrial (tanren-style) or import one?",
-            options: ["use industrial", "import from url", "ask me later"],
-          },
-          {
-            id: "test-coverage",
-            chapter: "tests",
-            question: "Test coverage looks thin. Should tanren's first specs include coverage work?",
-            options: ["add coverage specs", "intentional · skip"],
-          },
-          {
-            id: "external-pushes",
-            chapter: "risks",
-            question:
-              "Contributors push directly to feature branches. Auto-spec their changes, or stay out of the way?",
-            options: ["defer to governance"],
-          },
-        ],
-      };
+    async turn(input: ReconTurnInput): Promise<ReconTurn> {
+      return { status: "report", notes: "", requests: [], report: reportFor(input.index) };
     },
+  };
+}
+
+/** The derived report itself — reproducible and provider-free. */
+function reportFor(index: ReconIndex): ReconReport {
+  const slug = slugFromRepoUrl(index.repoUrl);
+  const architecture = detectArchitecture(index);
+  const risks = detectRisks(index);
+  return {
+    identity: {
+      slug,
+      purpose: `linked repository ${slug} (recon-inferred)`,
+      inferredFrom: index.files.some((f) => f.path.toLowerCase() === "readme.md")
+        ? "README.md · package.json"
+        : "repo layout",
+    },
+    personas: [
+      {
+        name: "developer · maintainer",
+        description: "maintains the codebase and reviews changes",
+        inferredFrom: "no other user roles found in code",
+      },
+    ],
+    behaviors: [
+      {
+        persona: "developer · maintainer",
+        title: "build & test the project",
+        inferredFrom: "ci workflows",
+      },
+      {
+        persona: "developer · maintainer",
+        title: "review incoming changes",
+        inferredFrom: "branch protection",
+      },
+    ],
+    architecture,
+    risks,
+    gaps: [
+      {
+        id: "design-dna",
+        chapter: "design dna",
+        question: "The repo has no clear design system. Default to industrial (tanren-style) or import one?",
+        options: ["use industrial", "import from url", "ask me later"],
+      },
+      {
+        id: "test-coverage",
+        chapter: "tests",
+        question: "Test coverage looks thin. Should tanren's first specs include coverage work?",
+        options: ["add coverage specs", "intentional · skip"],
+      },
+      {
+        id: "external-pushes",
+        chapter: "risks",
+        question: "Contributors push directly to feature branches. Auto-spec their changes, or stay out of the way?",
+        options: ["defer to governance"],
+      },
+    ],
   };
 }

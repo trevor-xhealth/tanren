@@ -2,8 +2,9 @@
 // read-only recon step.
 //
 // The brownfield "full track" goes beyond the minimal repo-link:
-//   1. read-only RECON — a read-only Answerer indexes the linked repo and
-//      pre-fills the onboarding chapters (identity / personas / behaviors /
+//   1. read-only RECON — a read-only Answerer EXPLORES the linked repo (the
+//      engine fetches what the model asks for, turn by turn, until it converges)
+//      and pre-fills the onboarding chapters (identity / personas / behaviors /
 //      architecture / risks) plus the gap questions the operator must answer.
 //   2. config-injection PR — propose 6 integration files, let the operator
 //      exclude any, then open ONE PR in the target repo (no runs until merge).
@@ -113,12 +114,103 @@ export const ReconReport = z
   .strict();
 export type ReconReport = z.infer<typeof ReconReport>;
 
+// ── Navigation: what an EXPLORING recon may ask the engine to fetch ────────
+//
+// Recon used to see a fixed slice of the repository — the ranked signal files
+// that won one of the reader's content slots — and nothing else, ever. If
+// understanding a repo required the 25th file, recon could not read it.
+//
+// The fix is NOT a bigger slice (twelve thousand files of content fit in no
+// context window, cost enormously, and lose everything on one failure). It is
+// NAVIGATION: the model NAMES what it wants next, turn by turn, and the ENGINE
+// fetches it. "Entire repo" therefore means REACHABLE, not resident.
+//
+// The three primitives are the ones an engineer actually uses in an unfamiliar
+// repo, and only one of them costs a network round-trip:
+//   • `list`  — the immediate children of a directory (free: served from the
+//               already-fetched tree);
+//   • `find`  — every path matching a substring or a `*` wildcard (free, same);
+//   • `read`  — a slice of one file's CONTENT (the only request that costs a
+//               GitHub call).
+// `offset` pages through everything — a byte offset for `read`, an entry
+// offset for `list` / `find` — so a file or a listing larger than one turn's
+// slice is still reachable IN FULL across turns. Nothing is unreachable.
+export const ReconRequestKind = z.enum(["read", "list", "find"]);
+export type ReconRequestKind = z.infer<typeof ReconRequestKind>;
+
+export const ReconRequest = z
+  .object({
+    kind: ReconRequestKind,
+    /** A repo-relative path (`read`/`list`) or a path pattern (`find`). */
+    target: z.string().min(1).max(400),
+    /** Byte offset for `read`; entry offset for `list`/`find`. */
+    offset: z.number().int().min(0).default(0),
+  })
+  .strict();
+export type ReconRequest = z.infer<typeof ReconRequest>;
+
+/**
+ * How many requests one turn may batch. This bounds a SINGLE TURN's width (so
+ * one turn's observations still fit the prompt budget) — it is NOT a bound on
+ * how much recon may read: the number of turns, and so the number of requests,
+ * is decided by convergence, not by a constant.
+ */
+export const RECON_REQUEST_BATCH_WIDTH = 20;
+
+/** What the engine observed on recon's behalf. Host-produced, never parsed. */
+export interface ReconObservation {
+  readonly request: ReconRequest;
+  readonly outcome: "content" | "listing" | "matches" | "not_found";
+  /** File slice (`read`) or newline-joined paths (`list`/`find`). */
+  readonly body: string;
+  /** Total available: file bytes for `read`, matching entries otherwise. */
+  readonly total: number;
+  /** How much of `total` this observation covers, starting at `offset`. */
+  readonly covered: number;
+}
+
 // ── The injectable recon Answerer + repo reader seams ──────────────────────
 
-// The read-only Answerer: given the repo index, infer the chapters + gaps.
-// Mirrors the conversation/interview answerer shape so it slots into the same seam.
-export interface ReconAnswerer {
-  read(index: ReconIndex): Promise<ReconReport>;
+/**
+ * ONE turn of the exploration: either the next batch of navigation requests, or
+ * the finished report. Strict JSON, exactly like every other Answerer output —
+ * the model never touches a filesystem; it NAMES what it wants and the engine
+ * fetches it read-only (PROJECT_BRIEF §3.2).
+ */
+export const ReconTurn = z
+  .object({
+    status: z.enum(["explore", "report"]),
+    /**
+     * The model's own carried-forward understanding. This is what lets recon
+     * read more of a repository than fits in one context: file bodies age out
+     * of the window, the conclusions drawn from them do not.
+     */
+    notes: z.string().max(4000).default(""),
+    requests: z.array(ReconRequest).max(RECON_REQUEST_BATCH_WIDTH).default([]),
+    report: ReconReport.nullish(),
+  })
+  .strict();
+export type ReconTurn = z.infer<typeof ReconTurn>;
+
+/** What one turn is shown: the entry-point index, what it has seen, its notes. */
+export interface ReconTurnInput {
+  index: ReconIndex;
+  /** Every observation so far, oldest→newest. The prompt renders what fits. */
+  observations: readonly ReconObservation[];
+  notes: string;
+  /**
+   * Exploration converged (nothing further is being learned) — this turn MUST
+   * return the report. The provider seam narrows the output schema so the model
+   * cannot ask for more, which is why the loop provably cannot run forever.
+   */
+  finalize: boolean;
+}
+
+// The read-only Answerer, one turn at a time: given the evidence so far, either
+// ask for more or return the chapters + gaps. Mirrors the conversation/interview
+// answerer shape so it slots into the same seam.
+export interface ReconTurnAnswerer {
+  turn(input: ReconTurnInput): Promise<ReconTurn>;
 }
 
 // Injectable repo reader — production resolves an App token + reads the repo
@@ -126,4 +218,13 @@ export interface ReconAnswerer {
 // recon engine never reaches into the provider HTTP surface directly.
 export interface RepoReader {
   index(repoUrl: string): Promise<ReconIndex>;
+}
+
+/**
+ * A `RepoReader` that can also be NAVIGATED. `index` stays the entry point (the
+ * directory rollup + the ranked previews); `explore` answers one request against
+ * the same READ-ONLY surface. Recon never writes through either.
+ */
+export interface RepoExplorer extends RepoReader {
+  explore(repoUrl: string, request: ReconRequest): Promise<ReconObservation>;
 }
