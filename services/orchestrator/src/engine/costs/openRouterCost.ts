@@ -17,29 +17,45 @@
 // afterward. It feeds `CostRecorder.record`'s `realProviderCostUsd` →
 // cost_basis `provider_response`, which OUTRANKS the static rate table.
 //
-// REACHABILITY TODAY (honest gap, see CostRecordContext.realProviderCostUsd):
-// Tanren runs models through CLI adapters (codex/aider/pi/opencode) that do NOT
-// surface OpenRouter's generation id in their output, so there is no id to query
-// per call right now. This client is the REAL, tested capture path the moment an
-// adapter (or the managed OpenAI-compatible shim) surfaces that id; until then an
-// OpenRouter per_token row with no captured charge records cost_usd NULL with
-// cost_basis 'unknown' — real spend is a metered FACT, NEVER a list-rate estimate.
+// REACHABILITY TODAY (honest gap, see CostRecordContext.realProviderCostUsd and
+// costs/meterability.ts): tanren runs models through CLI adapters
+// (codex/aider/pi/opencode) that do NOT surface OpenRouter's generation id in their
+// output — verified against codex-cli 0.145.0, whose `exec --json` stream re-emits
+// its own vocabulary and discards the upstream response envelope entirely. So there
+// is no id to query per call right now. This client is the REAL, tested capture path
+// the moment a harness surfaces that id; until then an OpenRouter per_token row with
+// no captured charge records cost_usd NULL with cost_basis 'unknown' — real spend is
+// a metered FACT, NEVER a list-rate estimate.
 //
-// BYOK CAVEAT. Under bring-your-own-key (the tenant's own upstream provider key
-// behind OpenRouter), OpenRouter's `total_cost` is its ROUTING/credit figure, not
-// the tenant's upstream bill — the real spend lands on the upstream provider's
-// invoice. So a BYOK call's `total_cost` is NOT the full real spend. This client
-// therefore takes an explicit `billingModel` and, for `byok`, returns a result
-// FLAGGED `upstreamBilled: true` (and refuses to assert it as authoritative real
-// spend) so the caller never records a partial figure as the real deduction.
+// OPENROUTER-BYOK CAVEAT (now DATA-DRIVEN). When the tenant has attached their own
+// UPSTREAM provider keys inside OpenRouter, OpenRouter charges only a routing fee —
+// the real inference cost lands on the upstream provider's invoice — so `total_cost`
+// is NOT the full real spend and must never be recorded as the real deduction (it
+// would UNDER-count against a ceiling).
+//
+// This used to be decided by a caller-declared `billingModel: 'platform' | 'byok'`
+// flag, which the run wiring fed from tanren's OWN sense of "BYOK" (the tenant's
+// credential vs the platform's) — a completely different question, and therefore a
+// guess wearing a fact's clothing. It is now read from OpenRouter's OWN report:
+// `cost_details.upstream_inference_cost` is documented as 0/null for a non-BYOK
+// request and positive when an upstream provider did the billing. A positive value
+// FLAGS the row `upstreamBilled` and disqualifies it as authoritative real spend.
 
-// One generation's cost as OpenRouter reports it. `totalCostUsd` is the real
-// platform charge; `upstreamBilled` marks a BYOK call whose real spend is on the
-// upstream provider's bill (so totalCostUsd is NOT the authoritative real spend).
+// One generation's cost as OpenRouter reports it. `totalCostUsd` is what OpenRouter
+// charged the account; `upstreamBilled` marks a generation whose real inference cost
+// was billed by an UPSTREAM provider (OpenRouter-BYOK), so `totalCostUsd` is only a
+// routing fee and NOT the authoritative real spend.
 export interface OpenRouterGenerationCost {
   generationId: string;
   totalCostUsd: number;
   upstreamBilled: boolean;
+  /**
+   * OpenRouter's reported upstream-provider charge for this generation
+   * (`cost_details.upstream_inference_cost`), when positive. Null when OpenRouter
+   * itself was the biller (the ordinary case) — the evidence behind
+   * `upstreamBilled`, kept so a caller can narrate WHY a figure was refused.
+   */
+  upstreamInferenceCostUsd: number | null;
 }
 
 // The injectable transport (mirrors the inbox connectors' HttpClient shape) so
@@ -65,13 +81,11 @@ export interface OpenRouterCostQueryInput {
   // adapters do not surface this yet — see this module's REACHABILITY note.
   generationId: string;
   // The resolved OpenRouter API key (the platform key for managed, the tenant's
-  // for a tenant-imported OpenRouter credential).
+  // for a tenant-imported OpenRouter credential). Either way, whoever owns this key
+  // is the party OpenRouter bills — so no caller-declared billing-model flag is
+  // needed or accepted: whether an UPSTREAM provider did the billing instead is read
+  // from OpenRouter's own `cost_details.upstream_inference_cost` on the response.
   token: string;
-  // 'platform' — OpenRouter is the biller, so total_cost IS the real spend.
-  // 'byok'     — an upstream provider is the real biller; total_cost is the
-  //              routing figure only, so it is flagged upstreamBilled and is NOT
-  //              the authoritative real spend.
-  billingModel: "platform" | "byok";
   baseUrl?: string;
 }
 
@@ -98,25 +112,32 @@ export async function queryGenerationCost(
   if (response.status !== 200) {
     throw new Error(`openRouterCost: query failed (status ${response.status}) for generation ${input.generationId}`);
   }
-  const totalCostUsd = extractTotalCost(response.body);
+  const row = generationRow(response.body);
+  const totalCostUsd = positiveNumberField(row, ["total_cost", "cost"]);
   if (totalCostUsd === null) {
     return null;
   }
+  // OPENROUTER-BYOK, read from OpenRouter's OWN report rather than a caller flag:
+  // a positive upstream inference cost means an upstream provider billed the real
+  // inference and OpenRouter charged only a routing fee, so `total_cost` is NOT the
+  // authoritative real deduction.
+  const upstreamInferenceCostUsd = positiveNumberField(costDetails(row), [
+    "upstream_inference_cost",
+    "upstreamInferenceCost",
+  ]);
   return {
     generationId: input.generationId,
     totalCostUsd,
-    // BYOK: the real spend is on the upstream provider's bill, so this figure is
-    // NOT the authoritative real deduction — flag it so the caller never records
-    // it as `provider_response` real spend.
-    upstreamBilled: input.billingModel === "byok",
+    upstreamBilled: upstreamInferenceCostUsd !== null,
+    upstreamInferenceCostUsd,
   };
 }
 
 // The authoritative real-spend figure to record as `provider_response`, or null
-// when none is available. A BYOK figure is DELIBERATELY null here: its
-// total_cost is not the upstream bill, so it must NOT set real spend (it would
-// undercount the actual charge). Only a platform-billed positive figure is the
-// real deduction.
+// when none is available. An UPSTREAM-BILLED figure is DELIBERATELY null here: its
+// total_cost is a routing fee, not the upstream bill, so it must NOT set real spend
+// (it would undercount the actual charge). Only a figure OpenRouter itself billed in
+// full is the real deduction.
 export function realProviderCostFrom(cost: OpenRouterGenerationCost | null): number | null {
   if (cost === null || cost.upstreamBilled) {
     return null;
@@ -124,20 +145,35 @@ export function realProviderCostFrom(cost: OpenRouterGenerationCost | null): num
   return cost.totalCostUsd > 0 ? cost.totalCostUsd : null;
 }
 
-// Pull OpenRouter's real per-generation charge out of a `/api/v1/generation`
-// body. OpenRouter wraps the row under `data`; `total_cost` is the real charge.
-// Tolerant by contract: a missing/non-finite/non-positive figure → null (an
-// honest no-capture, never a fabricated $0).
-function extractTotalCost(body: unknown): number | null {
+// The generation row inside a `/api/v1/generation` body. OpenRouter wraps it under
+// `data`; a bare body is tolerated so a future unwrapped shape still parses.
+function generationRow(body: unknown): Record<string, unknown> | null {
   if (typeof body !== "object" || body === null) {
     return null;
   }
   const record = body as Record<string, unknown>;
   const data = record["data"];
-  const row = typeof data === "object" && data !== null ? (data as Record<string, unknown>) : record;
-  const candidate = row["total_cost"] ?? row["cost"];
-  if (typeof candidate !== "number" || !Number.isFinite(candidate) || candidate <= 0) {
+  return typeof data === "object" && data !== null ? (data as Record<string, unknown>) : record;
+}
+
+// The `cost_details` sub-object (the per-generation cost breakdown), or null.
+function costDetails(row: Record<string, unknown> | null): Record<string, unknown> | null {
+  const details = row?.["cost_details"] ?? row?.["costDetails"];
+  return typeof details === "object" && details !== null ? (details as Record<string, unknown>) : null;
+}
+
+// The first POSITIVE finite number under any of `keys`. Tolerant by contract: a
+// missing/non-finite/non-positive figure → null (an honest no-capture, never a
+// fabricated $0 and never a negative treated as a charge).
+function positiveNumberField(row: Record<string, unknown> | null, keys: ReadonlyArray<string>): number | null {
+  if (row === null) {
     return null;
   }
-  return candidate;
+  for (const key of keys) {
+    const candidate = row[key];
+    if (typeof candidate === "number" && Number.isFinite(candidate) && candidate > 0) {
+      return candidate;
+    }
+  }
+  return null;
 }

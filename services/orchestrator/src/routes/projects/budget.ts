@@ -89,6 +89,15 @@ export interface BudgetView {
    * Surfaced so the operator UI can avoid painting placeholder/partial zeros as real spend.
    */
   failClosed: "unpriced_spend" | "unparseable_config" | "unresolvable_project_org" | null;
+  /**
+   * How many rows in the period are UN-PRICED real spend (NULL `cost_usd` on a
+   * real-spend-bearing billing mode) — the exact population behind
+   * `failClosed: 'unpriced_spend'`. `null` when the gate did not measure it (no
+   * ceiling configured, or an earlier fail-closed short-circuited the sum). Surfaced
+   * so an operator sees the SCALE of what could not be priced rather than a bare
+   * flag whose only advertised remedy (raise the ceiling) is inert against it.
+   */
+  unpricedCount: number | null;
   /** Application config generation for one-shot CAS on PUT. */
   revision: string;
 }
@@ -111,6 +120,7 @@ function toView(
     paused: shouldPauseOnBudget(state),
     pauseObservation,
     failClosed: state.failClosed ?? null,
+    unpricedCount: state.unpricedCount ?? null,
     revision,
   };
 }

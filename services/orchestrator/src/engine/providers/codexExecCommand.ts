@@ -6,7 +6,12 @@
 
 import { quoteSshShellArg } from "../ssh/command.js";
 import { codexManagedEnvPath } from "../credentials/codexMaterializer.js";
-import { CODEX_REASONING_EFFORT, resolveCodexDirectModel } from "./codexModel.js";
+import { CODEX_REASONING_EFFORT, recordedCodexModel, resolveCodexDirectModel } from "./codexModel.js";
+
+// Re-exported so codex.ts reaches the adapter's DECLARED model id (WriterAdapter
+// .model → `cost_records.model`) through the same command-builder module it already
+// imports, rather than taking a second dependency edge on codexModel.js.
+export { recordedCodexModel };
 
 export function buildCodexExecCommand(input: {
   codexHome: string;

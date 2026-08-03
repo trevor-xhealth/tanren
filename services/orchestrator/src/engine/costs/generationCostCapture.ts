@@ -72,7 +72,6 @@ export async function buildManagedGenerationCostCapturer(
       const cost = await queryGenerationCost(client, {
         generationId,
         token,
-        billingModel: "platform",
         baseUrl: deps.endpointBaseUrl,
       });
       return { cost: realProviderCostFrom(cost) };

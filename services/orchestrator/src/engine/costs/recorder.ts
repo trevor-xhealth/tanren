@@ -36,7 +36,28 @@ export interface CostRecordContext {
   projectId: string;
   orgId: string;
   cli: "codex" | "claude" | "opencode" | "aider" | "pi" | "reasonix" | "fake";
+  /**
+   * The REAL model id this call was sent to — `cost_records.model` and the NOTIONAL
+   * price-source lookup key. NOT a role name: the eight answerer/writer sites used to
+   * write pseudo ids (`"tanren-planner"`, `"tanren-writer"`, …) here because `role`
+   * had no other channel, which made `notional_cost_usd` structurally NULL in every
+   * deployment (no such id exists in the LiteLLM price source). `role` below is that
+   * channel; `""` remains the honest "no model id" value.
+   */
   model: string;
+  /**
+   * The AGENT ROLE this call served (`planner`, `writer`, `checker`, …), recorded in
+   * `cost_source_raw.role`.
+   *
+   * DELIBERATELY NOT A COLUMN. `cost_source_raw` is already a `jsonb NOT NULL` this
+   * recorder writes, and already carries provenance (authRef / billingMode /
+   * costBasis / provider / rawUsage) — role is provenance and belongs with it. A
+   * dedicated `role` column would consume a one-owner-one-slot migration for a field
+   * with a zero-migration home; if indexed group-by reporting later wants one it is a
+   * clean backfill from `cost_source_raw->>'role'`. See
+   * docs/_design/openrouter-cost-attribution.md §5.
+   */
+  role?: string;
   authRef: string;
   // Wall-clock runtime of the underlying call — recorded in cost_source_raw
   // for audit; no longer used to fabricate a dollar figure.
@@ -159,6 +180,9 @@ export class CostRecorder {
     const issueLoopId = context.issueLoopId;
     const rawCostSource = JSON.stringify({
       authRef: context.authRef,
+      // The agent role, on its OWN provenance field rather than smuggled through
+      // `model` (see CostRecordContext.role). Null for a call site with no role.
+      role: context.role ?? null,
       runtimeSeconds: context.runtimeSeconds ?? null,
       billingMode: source.billingMode,
       costBasis: source.costBasis,

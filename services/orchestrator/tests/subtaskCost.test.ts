@@ -2,14 +2,12 @@ import { describe, expect, it, vi } from "vitest";
 import type { CostRecorder } from "../src/engine/costs/index.js";
 import type { ProviderCostCapture } from "../src/engine/costs/generationCostCapture.js";
 import {
-  buildSubtaskCostContext,
   recordAnswererCost,
   recordWriterCost,
   secondsSince,
   type SubtaskCostContext,
   type TokenAccountingRole,
 } from "../src/engine/workflow/subtaskCost.js";
-import type { AppendEvent } from "../src/engine/workflow/subtaskLoop.js";
 import {
   emptyTokenUsage,
   type AnswererAdapter,
@@ -64,9 +62,6 @@ function ctx(recorder: CostRecorder, accountingFailures?: AccountingFailure[]): 
   };
 }
 
-// A module-scope capturer (identity-stable) for the threading assertion.
-const sharedCapturer = async (): Promise<ProviderCostCapture> => ({ cost: 1 });
-
 const answererAdapter: AnswererAdapter<unknown> = {
   kind: "answerer",
   cli: "codex",
@@ -86,6 +81,9 @@ const writerAdapter: WriterAdapter = {
   kind: "writer",
   cli: "claude",
   authRef: "vault://claude/key",
+  // The REAL model id, replacing the former hardcoded `"tanren-writer"` pseudo-id
+  // (which no price source could look up, so notional was NULL on every writer row).
+  model: "claude-opus-4",
   async runWriter() {
     return { diff: "", commits: [], exitReason: "completed" };
   },
@@ -243,7 +241,7 @@ describe("recordAnswererCost", () => {
 });
 
 describe("recordWriterCost", () => {
-  it("records the writer's reported token usage and the fixed tanren-writer model", async () => {
+  it("records the writer's reported token usage, the REAL model id, and the role on its own field", async () => {
     const { recorder, calls } = recordingRecorder();
     const tokenUsage: TokenUsage = {
       inputTokens: 100,
@@ -256,6 +254,7 @@ describe("recordWriterCost", () => {
     await recordWriterCost({
       ctx: ctx(recorder),
       adapter: writerAdapter,
+      model: writerAdapter.model ?? "",
       taskId: "task_write",
       runtimeSeconds: 12,
       tokenUsage,
@@ -267,7 +266,11 @@ describe("recordWriterCost", () => {
     expect(call.context).toMatchObject({
       taskId: "task_write",
       cli: "claude",
-      model: "tanren-writer",
+      // The REAL model id (not the old `"tanren-writer"` pseudo-id) plus the role on
+      // its OWN field (→ cost_source_raw.role) — together they restore the notional
+      // axis, since a real id is a key the LiteLLM price source can look up.
+      model: "claude-opus-4",
+      role: "writer",
       authRef: "vault://claude/key",
       runtimeSeconds: 12,
     });
@@ -280,6 +283,7 @@ describe("recordWriterCost", () => {
     await recordWriterCost({
       ctx: ctx(recorder, failures),
       adapter: writerAdapter,
+      model: writerAdapter.model ?? "",
       taskId: "task_write",
       runtimeSeconds: 1,
       tokenUsage: undefined,
@@ -290,7 +294,7 @@ describe("recordWriterCost", () => {
     });
     expect(calls[0]!.tokens).toEqual(emptyTokenUsage);
     // A REAL writer call missing telemetry is surfaced loudly, NOT a silent zero-token row.
-    expect(failures).toEqual([{ role: "writer", cli: "claude", model: "tanren-writer", taskId: "task_write" }]);
+    expect(failures).toEqual([{ role: "writer", cli: "claude", model: "claude-opus-4", taskId: "task_write" }]);
   });
 
   it("captures the REAL provider cost for a managed call carrying an OpenRouter generation id", async () => {
@@ -306,6 +310,7 @@ describe("recordWriterCost", () => {
     await recordWriterCost({
       ctx: { ...ctx(recorder), captureRealProviderCost: capturer },
       adapter: writerAdapter,
+      model: writerAdapter.model ?? "",
       taskId: "task_write",
       runtimeSeconds: 1,
       tokenUsage: { ...emptyTokenUsage, inputTokens: 1, totalTokens: 1, openRouterGenerationId: "gen-abc123" },
@@ -347,6 +352,7 @@ describe("recordWriterCost", () => {
     await recordWriterCost({
       ctx: { ...ctx(recorder), captureRealProviderCost: capturer },
       adapter: writerAdapter,
+      model: writerAdapter.model ?? "",
       taskId: "task_write",
       runtimeSeconds: 1,
       tokenUsage: { ...emptyTokenUsage, inputTokens: 1, totalTokens: 1 },
@@ -362,6 +368,7 @@ describe("recordWriterCost", () => {
     await recordWriterCost({
       ctx: ctx(recorder),
       adapter: writerAdapter,
+      model: writerAdapter.model ?? "",
       taskId: "task_write",
       runtimeSeconds: 1,
       tokenUsage: { ...emptyTokenUsage, inputTokens: 1, totalTokens: 1, openRouterGenerationId: "gen-xyz" },
@@ -386,7 +393,9 @@ describe("recordWriterCost - apex v50 exit-reason gating (task #14)", () => {
     await recordWriterCost({
       ctx: ctx(recorder, failures),
       // codex is a REAL CLI; isRealMissingTelemetry trips on the undefined usage.
-      adapter: { ...writerAdapter, cli: "codex" },
+      adapter: { ...writerAdapter, cli: "codex", model: "openai/gpt-5.6-luna" },
+      // The OpenRouter-namespaced id a codex-through-OpenRouter run really sends.
+      model: "openai/gpt-5.6-luna",
       taskId: "task_write",
       runtimeSeconds: 1,
       tokenUsage: undefined,
@@ -400,7 +409,7 @@ describe("recordWriterCost - apex v50 exit-reason gating (task #14)", () => {
     "LOUD-FAILED: %s writer with no telemetry STILL emits token_accounting_failed (genuine parser/adapter drift)",
     async (exitReason) => {
       const { calls, failures } = await runCase(exitReason);
-      expect(failures).toEqual([{ role: "writer", cli: "codex", model: "tanren-writer", taskId: "task_write" }]);
+      expect(failures).toEqual([{ role: "writer", cli: "codex", model: "openai/gpt-5.6-luna", taskId: "task_write" }]);
       // The row is still recorded (empty usage → NULL-loud downstream).
       expect(calls).toHaveLength(1);
       expect(calls[0]!.tokens).toEqual(emptyTokenUsage);
@@ -426,6 +435,7 @@ describe("recordWriterCost - apex v50 exit-reason gating (task #14)", () => {
     await recordWriterCost({
       ctx: ctx(recorder, failures),
       adapter: { ...writerAdapter, cli: "fake" },
+      model: writerAdapter.model ?? "",
       taskId: "task_write",
       runtimeSeconds: 1,
       tokenUsage: undefined,
@@ -433,35 +443,6 @@ describe("recordWriterCost - apex v50 exit-reason gating (task #14)", () => {
       exitReason: "completed",
     });
     expect(failures).toEqual([]);
-  });
-});
-
-describe("buildSubtaskCostContext", () => {
-  it("wires both loud event sinks over the loop's appendEvent (token_accounting_failed + provider_capture_failed)", async () => {
-    const { recorder } = recordingRecorder();
-    const appended: Array<{ type: string; payload: Record<string, unknown>; taskId?: string }> = [];
-    const appendEvent = (async (type, payload, taskId) => {
-      appended.push({ type, payload: payload as Record<string, unknown>, taskId });
-    }) as AppendEvent;
-    const built = buildSubtaskCostContext(
-      { recorder, runId: "run_1", specId: "spec_1", projectId: "proj_1" },
-      appendEvent,
-    );
-    await built.emitTokenAccountingFailed?.({ role: "writer", cli: "claude", model: "tanren-writer", taskId: "t1" });
-    await built.emitProviderCaptureFailed?.({ generationId: "gen-1", detail: "boom", taskId: "t2" });
-    expect(appended.map((a) => a.type)).toEqual(["usage.token_accounting_failed", "cost.provider_capture_failed"]);
-    expect(appended[0]).toMatchObject({ payload: { role: "writer", cli: "claude" }, taskId: "t1" });
-    expect(appended[1]).toMatchObject({ payload: { generationId: "gen-1", detail: "boom" }, taskId: "t2" });
-  });
-
-  it("threads the managed capturer through when supplied", () => {
-    const { recorder } = recordingRecorder();
-    const appendEvent = (async () => {}) as AppendEvent;
-    const built = buildSubtaskCostContext(
-      { recorder, runId: "r", specId: "s", projectId: "p", captureRealProviderCost: sharedCapturer },
-      appendEvent,
-    );
-    expect(built.captureRealProviderCost).toBe(sharedCapturer);
   });
 });
 

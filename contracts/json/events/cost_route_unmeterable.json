@@ -1,0 +1,30 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "cli": {
+      "type": "string"
+    },
+    "detail": {
+      "type": "string"
+    },
+    "reason": {
+      "enum": [
+        "harness_discards_generation_id",
+        "byok_upstream_invoice"
+      ],
+      "type": "string"
+    },
+    "refKind": {
+      "type": "string"
+    }
+  },
+  "required": [
+    "cli",
+    "refKind",
+    "reason",
+    "detail"
+  ],
+  "type": "object",
+  "x-tanren-schema-id": "tanren.event.cost.route_unmeterable"
+}

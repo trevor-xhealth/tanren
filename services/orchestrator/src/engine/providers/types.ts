@@ -77,6 +77,16 @@ export interface WriterAdapter {
   // Adapters that do not consume an LLM (e.g. fake fixtures) still declare
   // an authRef so the CostRecorder can run uniformly.
   readonly authRef: string;
+  // The REAL model id this adapter sends — the id the recorder writes to
+  // `cost_records.model` and the NOTIONAL price source looks up. Each adapter
+  // resolves it the same way the exec/config path does (e.g. codex's
+  // OpenRouter-namespaced `openai/gpt-5.6-luna` on the config.toml paths vs the bare
+  // `gpt-5.6-luna` on the direct paths), so the recorded id is what was actually
+  // requested. OPTIONAL by design: the ~40 test fixtures implementing this interface
+  // legitimately have no model, and the recorder already treats an absent/empty
+  // model as the honest "notional NULL, stay quiet" path — so a fixture needs no
+  // change and can never be mistaken for a priced call.
+  readonly model?: string;
   // `baseSha` is the run's BASE commit (the clone point / base-branch tip),
   // captured once after the workspace clone. When provided, the adapter diffs
   // the workspace against it so each subtask is judged against the CUMULATIVE
@@ -120,6 +130,8 @@ export interface AnswererAdapter<TOutput> {
   // See WriterAdapter.authRef: attribution applies uniformly to
   // every real Codex planner/writer/checker/auditor call.
   readonly authRef: string;
+  // The REAL model id this adapter sends — see WriterAdapter.model.
+  readonly model?: string;
   runAnswerer(opts: AnswererRunOptions<TOutput>): Promise<TOutput>;
   // The token telemetry parsed from the MOST RECENT runAnswerer call's harness
   // output (codex/claude emit per-call usage in their JSONL/stream-json events),

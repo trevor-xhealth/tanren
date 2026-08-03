@@ -1,0 +1,18 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "cli": {
+      "type": "string"
+    },
+    "reason": {
+      "type": "string"
+    }
+  },
+  "required": [
+    "cli",
+    "reason"
+  ],
+  "type": "object",
+  "x-tanren-schema-id": "tanren.event.cost.generation_id_missing"
+}

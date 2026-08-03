@@ -67,7 +67,22 @@ export interface SubtaskCostContext {
   // The loud-event sink for a MANAGED OpenRouter real-cost capture failure
   // (auth/transport/API). Threaded from the loop; absent ⇒ no sink.
   emitProviderCaptureFailed?: EmitProviderCaptureFailed;
+  // DRIFT DETECTION (the other direction from costs/meterability.ts): a capturer is
+  // wired — i.e. the route was judged able to produce per-call facts — but a real
+  // call surfaced NO generation id, so the capture silently could not fire. That
+  // silence is exactly the symptom of the harness dropping the upstream envelope, so
+  // it must be LOUD rather than a quiet reversion to NULL cost. Threaded from the
+  // loop; absent ⇒ no sink.
+  emitGenerationIdMissing?: EmitGenerationIdMissing;
+  // ONE-SHOT LATCH for the above. The id is missing on EVERY call of an affected
+  // run, so emitting per call would bury the timeline in identical events; the run's
+  // standing posture is already narrated once by `cost.route_unmeterable`. Mutated
+  // in place on the shared per-run context.
+  generationIdMissingReported?: { reported: boolean };
 }
+
+// A narrow callback that emits the loud `cost.generation_id_missing` event.
+export type EmitGenerationIdMissing = (input: { cli: string; taskId: string }) => Promise<void>;
 
 // A narrow callback that emits the loud `cost.provider_capture_failed` event.
 export type EmitProviderCaptureFailed = (input: {
@@ -100,9 +115,22 @@ async function captureRealProviderCostUsd(
   ctx: SubtaskCostContext,
   tokenUsage: TokenUsage | undefined,
   taskId: string,
+  cli: string,
 ): Promise<number | null> {
   const generationId = tokenUsage?.openRouterGenerationId;
-  if (ctx.captureRealProviderCost === undefined || generationId === undefined) {
+  if (ctx.captureRealProviderCost === undefined) {
+    return null;
+  }
+  if (generationId === undefined) {
+    // A capturer IS wired (the route was judged meterable), yet the harness gave us
+    // no id to query with — the exact silent-null this whole design exists to make
+    // visible. Latched to once per run so the signal is legible, not a flood.
+    if (ctx.generationIdMissingReported?.reported !== true) {
+      if (ctx.generationIdMissingReported !== undefined) {
+        ctx.generationIdMissingReported.reported = true;
+      }
+      await ctx.emitGenerationIdMissing?.({ cli, taskId });
+    }
     return null;
   }
   const capture = await ctx.captureRealProviderCost(generationId);
@@ -128,6 +156,20 @@ export interface AnswererCostInput<TOutput> {
     "planner" | "checker" | "auditor" | "triage" | "convergence" | "demoRun" | "designOracle"
   >;
   taskId: string;
+  /**
+   * The REAL model id this call was sent to — the `cost_records.model` value and the
+   * NOTIONAL price-source lookup key.
+   *
+   * It used to be a PSEUDO id naming the role (`"tanren-planner"`, `"tanren-writer"`,
+   * …) because there was no other channel for the role. That smuggling had a cost:
+   * no such id exists in the LiteLLM price source, so `computeNotionalUsd` returned
+   * null for EVERY answerer/writer row and `notional_cost_usd` was structurally NULL
+   * in every deployment (with `cost.notional_unpriced` firing on 100% of rows). The
+   * role now travels on its own field (`CostRecordContext.role` →
+   * `cost_source_raw.role`), so this carries the real id. `""` is the honest
+   * "adapter declares no model" value (a `fake` fixture) — the recorder already
+   * treats it as notional-null-and-quiet.
+   */
   model: string;
   runtimeSeconds: number;
   rawUsage: Record<string, unknown>;
@@ -139,6 +181,8 @@ export interface WriterCostInput {
   ctx: SubtaskCostContext;
   adapter: WriterAdapter;
   taskId: string;
+  /** The REAL model id this writer call was sent to — see {@link AnswererCostInput.model}. */
+  model: string;
   runtimeSeconds: number;
   tokenUsage: TokenUsage | undefined;
   rawUsage: Record<string, unknown>;
@@ -174,7 +218,7 @@ export async function recordAnswererCost<TOutput>(input: AnswererCostInput<TOutp
   // convergence/demoRun) on a metered key records a NULL-cost `per_token` row, which
   // the budget gate's fail-closed `unpriced_spend` pause trips on permanently when
   // ccusage cannot price the window. null on BYOK / no generation id (no estimate).
-  const realProviderCostUsd = await captureRealProviderCostUsd(input.ctx, tokenUsage, input.taskId);
+  const realProviderCostUsd = await captureRealProviderCostUsd(input.ctx, tokenUsage, input.taskId, input.adapter.cli);
   // FINALIZE GUARD (task #35): a throw from `recorder.record` (DB INSERT / RLS /
   // schema drift) is RE-RAISED as `CostRecordError` so the outer
   // `runStageBodyWithFinalizeGuard` classifies it deterministically as
@@ -191,6 +235,9 @@ export async function recordAnswererCost<TOutput>(input: AnswererCostInput<TOutp
         ...(input.issueLoopId === undefined ? {} : { issueLoopId: input.issueLoopId }),
         cli: input.adapter.cli,
         model: input.model,
+        // The agent ROLE, on its OWN channel (→ `cost_source_raw.role`) instead of
+        // smuggled through `model`. See AnswererCostInput.model.
+        role: input.role,
         authRef: input.adapter.authRef,
         runtimeSeconds: input.runtimeSeconds,
         realProviderCostUsd,
@@ -219,7 +266,12 @@ export async function recordWriterCost(input: WriterCostInput): Promise<void> {
   const tokens = input.tokenUsage ?? emptyTokenUsage;
   // MANAGED OpenRouter run: query the REAL `usage.cost` for this call's generation
   // id so cost_usd is a metered FACT (`provider_response`). null on BYOK / no id.
-  const realProviderCostUsd = await captureRealProviderCostUsd(input.ctx, input.tokenUsage, input.taskId);
+  const realProviderCostUsd = await captureRealProviderCostUsd(
+    input.ctx,
+    input.tokenUsage,
+    input.taskId,
+    input.adapter.cli,
+  );
   // FINALIZE GUARD (task #35): see recordAnswererCost above — re-raise as
   // `CostRecordError` so the outer guard classifies as `cost_record_failed`.
   try {
@@ -231,7 +283,8 @@ export async function recordWriterCost(input: WriterCostInput): Promise<void> {
         projectId: input.ctx.projectId,
         orgId: input.ctx.orgId,
         cli: input.adapter.cli,
-        model: "tanren-writer",
+        model: input.model,
+        role: "writer",
         authRef: input.adapter.authRef,
         runtimeSeconds: input.runtimeSeconds,
         realProviderCostUsd,
@@ -270,7 +323,7 @@ export async function recordWriterCost(input: WriterCostInput): Promise<void> {
     await input.ctx.emitTokenAccountingFailed?.({
       role: "writer",
       cli: input.adapter.cli,
-      model: "tanren-writer",
+      model: input.model,
       taskId: input.taskId,
     });
   }
@@ -315,6 +368,19 @@ export function buildSubtaskCostContext(
           model,
           reason:
             "a real CLI call recorded its cost with no token telemetry; token accounting is mandatory, so this is surfaced loudly rather than as a silent zero-token call",
+        },
+        taskId,
+      );
+    },
+    // DRIFT: a wired capturer that never receives an id. One-shot per run.
+    generationIdMissingReported: { reported: false },
+    emitGenerationIdMissing: async ({ cli, taskId }) => {
+      await appendEvent(
+        "cost.generation_id_missing",
+        {
+          cli,
+          reason:
+            "a per-call real-cost capturer is wired for this run, but the harness surfaced no provider generation id on a real call, so the capture could not fire and cost_usd is NULL; surfaced loudly rather than silently reverting to unpriced spend (see docs/_design/openrouter-cost-attribution.md)",
         },
         taskId,
       );

@@ -123,6 +123,16 @@ const SEVERITY_OVERRIDES: Partial<Record<EventName, Severity>> = {
   // A configured dollar ceiling can never fire against this credential — the run
   // fails closed; a setup-time misconfig the operator must fix; fail.
   "cost.ceiling_unreachable": "fail",
+  // Symmetric to the above: the ceiling fires PERMANENTLY and unclearably over this
+  // route (per_token + no real-spend capture), so the run is refused at setup rather
+  // than deadlocking mid-flight — a setup-time misconfig the operator must fix; fail.
+  "cost.ceiling_unenforceable": "fail",
+  // The route can produce no per-call real-spend fact (every cost_usd will be NULL).
+  // NOT a failure — the run proceeds and token/notional accounting still work — but a
+  // standing limitation the operator must see; warn. Same for a route judged METERABLE
+  // whose harness then surfaced no generation id (drift reverting spend to NULL); warn.
+  "cost.route_unmeterable": "warn",
+  "cost.generation_id_missing": "warn",
   // silent-fallback hardening. A managed OpenRouter per-call real-cost capture
   // failed — authoritative platform spend that would otherwise silently vanish;
   // fail. A run-end reconcile resolved a positive real total that landed on no

@@ -195,6 +195,10 @@ async function runWriterStageBody(args: WriterStageInput): Promise<WriterStageOu
     ctx: args.costCtx,
     adapter: args.adapter,
     taskId: args.writeTaskId,
+    // The REAL model id the writer adapter sends — replaces the former
+    // `"tanren-writer"` pseudo-id, which no price source could ever look up. The
+    // role is recorded on its own field (`role: "writer"`, → cost_source_raw.role).
+    model: args.adapter.model ?? "",
     runtimeSeconds,
     tokenUsage: writerResult.tokenUsage,
     rawUsage: args.buildUsage?.({

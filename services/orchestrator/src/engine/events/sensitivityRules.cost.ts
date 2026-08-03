@@ -38,6 +38,33 @@ export const costSensitivityRules: SensitivityRule[] = [
     ["ceilingUsd", "public"],
     ["reason", "public"],
   ]),
+  // cost.ceiling_unenforceable (the codex→OpenRouter deadlock refusal) — refKind is
+  // secret-free, cli/billingMode/reason are fixed enums, ceiling/detail/remedy are
+  // non-sensitive config + diagnosis prose. No secret value; all public.
+  ...rulesFor("cost.ceiling_unenforceable", [
+    ["refKind", "public"],
+    ["cli", "public"],
+    ["billingMode", "public"],
+    ["ceilingUsd", "public"],
+    ["reason", "public"],
+    ["detail", "public"],
+    ["remedy", "public"],
+  ]),
+  // cost.route_unmeterable (standing metering limitation) — cli is a harness name,
+  // refKind is the secret-free KIND label, reason is a closed enum and detail is a
+  // fixed diagnosis string. No secret value; all public.
+  ...rulesFor("cost.route_unmeterable", [
+    ["cli", "public"],
+    ["refKind", "public"],
+    ["reason", "public"],
+    ["detail", "public"],
+  ]),
+  // cost.generation_id_missing (harness-vocabulary drift) — cli is a harness name,
+  // reason is a fixed diagnosis string; all public.
+  ...rulesFor("cost.generation_id_missing", [
+    ["cli", "public"],
+    ["reason", "public"],
+  ]),
   // cost.credit_rate_unknown (cost PR-C) — refKind is the secret-free KIND label,
   // creditsConsumed is an operational count, reason is a fixed diagnosis. No secret.
   ...rulesFor("cost.credit_rate_unknown", [

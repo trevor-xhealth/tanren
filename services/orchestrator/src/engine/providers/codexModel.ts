@@ -13,6 +13,8 @@
 // Reasoning effort is `high` on every path (config.toml `model_reasoning_effort`
 // for the OpenRouter path; `-c model_reasoning_effort="high"` for the direct path).
 
+import { credentialTypeForRef, providerSlugForRef } from "../credentials/credentialType.js";
+
 // The bare model id for codex's native/direct paths (BYOK bundle + BYOK OpenAI).
 export const CODEX_DEFAULT_MODEL = "gpt-5.6-luna";
 
@@ -32,4 +34,18 @@ export function resolveCodexDirectModel(model?: string): string {
 
 export function resolveCodexOpenRouterModel(model?: string): string {
   return model ?? CODEX_OPENROUTER_MODEL;
+}
+
+// The model id a codex adapter will ACTUALLY request — the value the cost recorder
+// writes to `cost_records.model` and the notional price source looks up. It must be
+// the same string the exec path pins, and the two namespaces differ (see above), so
+// this mirrors `codexMaterializer`'s own OpenRouter-vs-direct dispatch: an explicit
+// managed endpoint OR a BYOK `credential/openrouter/` api_key routes through
+// OpenRouter (config.toml, namespaced id); everything else is direct (bare id).
+export function recordedCodexModel(input: { credentialRef: string; endpointBaseUrl?: string; model?: string }): string {
+  const routesThroughOpenRouter =
+    input.endpointBaseUrl !== undefined ||
+    (credentialTypeForRef(input.credentialRef) === "api_key" &&
+      providerSlugForRef(input.credentialRef) === "openrouter");
+  return routesThroughOpenRouter ? resolveCodexOpenRouterModel(input.model) : resolveCodexDirectModel(input.model);
 }

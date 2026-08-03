@@ -9,7 +9,9 @@ import type { AnswererAdapter, TokenUsage, UsageLimitSignal, WriterAdapter, Writ
 import { findOpenRouterGenerationId, foldGenerationId } from "./openRouterGenerationId.js";
 import { findTokenUsageBounded, parseJsonObject, splitNonEmptyJsonlLines } from "./findTokenUsage.js";
 import { captureBaselineSha, captureGitStateAfterCodex } from "./codexGit.js";
-import { buildCodexAnswererExecCommand, buildCodexExecCommand } from "./codexExecCommand.js";
+// recordedCodexModel: the id the adapter DECLARES (WriterAdapter.model) →
+// `cost_records.model`, from the SAME dispatch the exec/config path uses.
+import { buildCodexAnswererExecCommand, buildCodexExecCommand, recordedCodexModel } from "./codexExecCommand.js";
 import { createLogger } from "../observability/logger.js";
 import { parseWithOneSchemaRepair } from "./answererRepair.js";
 import {
@@ -24,8 +26,8 @@ const log = createLogger("codex");
 // Re-exported so existing `from "./codex.js"` importers (the uniqueness test) stay stable.
 export { safeSchemaFileName };
 
-// Re-exported from codexExecCommand.ts (split out to keep this adapter under the
-// 500-line cap) so existing importers (and the command-builder tests) are stable.
+// Re-exported from codexExecCommand.ts (split out for the 500-line cap) so existing
+// importers (and the command-builder tests) stay stable.
 export { buildCodexAnswererExecCommand, buildCodexExecCommand };
 
 export interface CodexWriterDependencies {
@@ -37,10 +39,10 @@ export interface CodexWriterDependencies {
   // The routing-chain model. It overrides the direct and OpenRouter defaults.
   model?: string;
   codexHomeBaseDir?: string;
-  // SaaS Tier-B #5: optional managed-endpoint base URL. When set (managed run),
-  // the materializer writes codex's config.toml OpenRouter provider block
-  // (base_url = this endpoint) + an OPENROUTER_API_KEY env file the exec sources,
-  // so codex routes THROUGH OpenRouter. Absent ⇒ BYOK: no override (unchanged).
+  // SaaS Tier-B #5: optional managed-endpoint base URL. When set (managed run), the
+  // materializer writes codex's config.toml OpenRouter provider block (base_url =
+  // this endpoint) + an OPENROUTER_API_KEY env file the exec sources, so codex routes
+  // THROUGH OpenRouter. Absent ⇒ BYOK: no override (unchanged).
   endpointBaseUrl?: string;
 }
 
@@ -52,8 +54,7 @@ export interface CodexEventTelemetry {
   // recorder can query the REAL `usage.cost` (see TokenUsage.openRouterGenerationId).
   openRouterGenerationId?: string;
   // Count of NON-empty lines that failed to parse as JSON. Codex runs `--json`, so
-  // every non-empty line MUST be a JSON event — a positive count is contract drift
-  // (silent-fallback hardening: a malformed line is no longer silently skipped).
+  // every non-empty line MUST be a JSON event — a positive count is contract drift.
   malformedLineCount?: number;
 }
 
@@ -88,6 +89,7 @@ export function createCodexWriter(dependencies: CodexWriterDependencies): Writer
     kind: "writer",
     cli: "codex",
     authRef: dependencies.credentialRef,
+    model: recordedCodexModel(dependencies),
     async runWriter(opts): Promise<WriterResult> {
       // SaaS Tier-B #5: a MANAGED run carries an endpointBaseUrl (the platform
       // OpenRouter shell). In managed mode the credential is a plain OpenRouter
@@ -190,6 +192,7 @@ export function createCodexAnswerer<TOutput>(dependencies: CodexAnswererDependen
     kind: "answerer",
     cli: "codex",
     authRef: dependencies.credentialRef,
+    model: recordedCodexModel(dependencies),
     lastTokenUsage: () => lastTokenUsage,
     async runAnswerer(opts): Promise<TOutput> {
       // SaaS Tier-B #5: managed ⇒ config.toml OpenRouter provider block + an
