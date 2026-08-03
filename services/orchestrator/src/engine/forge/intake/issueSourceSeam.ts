@@ -33,12 +33,14 @@ import {
   IntakeSourceAuthorityError,
   IntakeSourceResourceError,
   UnsupportedInboxProviderError,
-  assertSupportedIssuesProvider,
 } from "../inbox/connectorErrors.js";
 import {
   ActiveGitHubIssuesConfig,
   buildInboxConnectorMap,
+  buildPgLinearIntakeAuthority,
   buildPgSentryIntakeAuthority,
+  resolveIssuesProvider,
+  type LinearHttpClient,
   type SentryHttpClient,
   type InboxSource,
   type SourceConnector,
@@ -145,18 +147,23 @@ export interface BuildIntakeConnectorMapDeps {
   // org on the static-token path (it does not silently disable intake).
   githubAppMinter?: GithubAppTokenMinter;
   sentryHttp?: SentryHttpClient;
+  linearHttp?: LinearHttpClient;
 }
 
 /**
  * Whether a source is a GitHub-provider `issues` source — the only source whose
  * polling depends on the org's GitHub credential. A GitHub source carries kind
- * `issues` with the one canonical GitHub config. Invalid/deleted-provider rows
- * do not trigger credential resolution; the connector classifies them before I/O.
+ * `issues` with the one canonical GitHub config and no `provider` discriminator.
+ * A LINEAR `issues` source resolves its own exact integration grant, so it must
+ * NOT drag the org's GitHub credential into scope — an org that polls Linear and
+ * has never installed the GitHub App is a legitimate configuration, not a
+ * missing-credential failure. Invalid/deleted-provider rows likewise do not
+ * trigger credential resolution; the connector classifies them before I/O.
  */
 function isGithubIssuesSourceNeedingOrgCredential(source: InboxSource): boolean {
   if (source.kind !== "issues") return false;
   try {
-    assertSupportedIssuesProvider(source.config);
+    if (resolveIssuesProvider(source.config) !== "github") return false;
   } catch {
     return false;
   }
@@ -203,7 +210,9 @@ export async function buildIntakeConnectorMapForOrg(
     secrets: deps.secrets,
     githubHttp: deps.githubHttp,
     sentryAuthority: buildPgSentryIntakeAuthority(deps.pool),
+    linearAuthority: buildPgLinearIntakeAuthority(deps.pool),
     ...(deps.sentryHttp === undefined ? {} : { sentryHttp: deps.sentryHttp }),
+    ...(deps.linearHttp === undefined ? {} : { linearHttp: deps.linearHttp }),
     ...(installation === undefined ? {} : { installation }),
     ...(staticRef === undefined ? {} : { defaultGithubStaticRef: staticRef }),
     ...(deps.githubAppMinter === undefined ? {} : { minter: deps.githubAppMinter }),

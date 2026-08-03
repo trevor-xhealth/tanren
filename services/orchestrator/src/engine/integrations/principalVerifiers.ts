@@ -11,6 +11,7 @@
 import { z } from "zod";
 import { type PrincipalCandidate, type PrincipalVerificationPermit } from "../contracts/integrationAuthority.js";
 import type { IntegrationSecretStore, StagedSecretHandle } from "../contracts/integrationSecretStore.js";
+import { LinearPrincipalVerifier } from "./linearPrincipalVerifier.js";
 import {
   type FetchImpl,
   principalMetadata as meta,
@@ -433,7 +434,7 @@ export class FlyPrincipalVerifier implements PrincipalVerifier {
 }
 
 export function hasPrincipalVerifier(providerKind: string): boolean {
-  return ["slack", "sentry", "deploy.vercel", "deploy.flyio"].includes(providerKind);
+  return ["slack", "sentry", "linear", "deploy.vercel", "deploy.flyio"].includes(providerKind);
 }
 
 export function principalVerifierFor(providerKind: string, fetchImpl: FetchImpl = fetch): PrincipalVerifier {
@@ -442,6 +443,8 @@ export function principalVerifierFor(providerKind: string, fetchImpl: FetchImpl 
       return new SlackPrincipalVerifier(fetchImpl);
     case "sentry":
       return new SentryPrincipalVerifier(fetchImpl);
+    case "linear":
+      return new LinearPrincipalVerifier(fetchImpl);
     case "deploy.vercel":
       return new VercelPrincipalVerifier(fetchImpl);
     case "deploy.flyio":

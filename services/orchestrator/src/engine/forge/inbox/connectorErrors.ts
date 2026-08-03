@@ -20,13 +20,17 @@
 //     transient), but the connector never swallows it as an empty list.
 
 /** The connectors that pull from an external issue/error source. */
-export type IntakeSourceProvider = "github" | "sentry";
+export type IntakeSourceProvider = "github" | "sentry" | "linear";
+
+/** The issue-tracker providers the `issues` source kind dispatches to. */
+export type IssuesProvider = "github" | "linear";
 
 /**
  * An `issues` source asked for a provider/credential shape that Tanren does not
- * support. Linear/Jira bare-token intake was deleted rather than adapted onto
- * the integration-grant plane; this error keeps a persisted stale config from
- * being mistaken for a transient GitHub failure.
+ * support. Bare-token intake (a source-owned `tokenRef`) was deleted rather than
+ * adapted onto the integration-grant plane, and Jira has not yet been adapted;
+ * this error keeps a persisted stale config from being mistaken for a transient
+ * GitHub failure.
  */
 export class UnsupportedInboxProviderError extends Error {
   readonly retriable = false as const;
@@ -65,22 +69,50 @@ export function assertNoSourceCredentialOverride(config: unknown): void {
 }
 
 /**
- * Reject deleted providers and the former optional GitHub discriminator. The
- * source kind is now the sole provider discriminator; keeping both forms would
- * preserve a second compatibility authority.
+ * Resolve which issue-tracker connector an `issues` source belongs to, fail-closed.
+ *
+ * The `issues` kind serves more than one provider, so SOMETHING must discriminate.
+ * The rule is deliberately asymmetric:
+ *   • NO `provider` key ⇒ GitHub. GitHub predates the discriminator and every
+ *     persisted GitHub row omits it; `ActiveGitHubIssuesConfig` stays untouched.
+ *   • `provider: "linear"` ⇒ Linear, whose one canonical shape carries it.
+ *   • `provider: "github"` is STILL refused. When `issues` served GitHub alone the
+ *     key was a redundant second authority for a fact the kind already stated —
+ *     that objection is specific to GitHub and survives Linear's arrival.
+ *   • Every other value — a deleted provider (`jira`), a typo, a non-string — is a
+ *     LOUD refusal. Widening the kind must not widen it to anything.
+ *
+ * Source-owned credential coordinates are rejected first, on every arm.
  */
-export function assertSupportedIssuesProvider(config: unknown): void {
+export function resolveIssuesProvider(config: unknown): IssuesProvider {
   assertNoSourceCredentialOverride(config);
-  if (typeof config !== "object" || config === null || Array.isArray(config)) return;
+  if (typeof config !== "object" || config === null || Array.isArray(config)) return "github";
   const record = config as Record<string, unknown>;
-  if (Object.hasOwn(record, "provider")) {
-    const provider = record["provider"];
-    throw new UnsupportedInboxProviderError(
-      typeof provider === "string" ? provider : null,
-      provider === "github"
-        ? "the provider discriminator was removed; kind 'issues' is the sole GitHub authority"
-        : `issues sources support only GitHub through kind 'issues' (received ${typeof provider === "string" ? `'${provider}'` : "a non-string provider"})`,
-    );
+  if (!Object.hasOwn(record, "provider")) return "github";
+  const provider = record["provider"];
+  if (provider === "linear") return "linear";
+  throw new UnsupportedInboxProviderError(
+    typeof provider === "string" ? provider : null,
+    provider === "github"
+      ? "the provider discriminator was removed for GitHub; kind 'issues' with no provider is the sole GitHub authority"
+      : `issues sources support only GitHub (no provider) and Linear (provider 'linear') (received ${typeof provider === "string" ? `'${provider}'` : "a non-string provider"})`,
+  );
+}
+
+/** Reject an `issues` config whose provider/credential shape is unsupported. */
+export function assertSupportedIssuesProvider(config: unknown): void {
+  resolveIssuesProvider(config);
+}
+
+/**
+ * Assert an `issues` config belongs to THIS connector before it does any work.
+ * The dispatcher already routed by provider; a connector that trusted that alone
+ * would silently mis-read a config it does not own if the map were ever mis-wired.
+ */
+export function assertIssuesProviderIs(expected: IssuesProvider, config: unknown): void {
+  const actual = resolveIssuesProvider(config);
+  if (actual !== expected) {
+    throw new UnsupportedInboxProviderError(actual, `the ${expected} issues connector cannot read a ${actual} source`);
   }
 }
 

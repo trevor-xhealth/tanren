@@ -13,6 +13,8 @@ export function providerLabel(providerKind: string): string {
       return "sentry";
     case "slack":
       return "slack";
+    case "linear":
+      return "linear";
     case "deploy.vercel":
       return "deploy · vercel";
     case "deploy.flyio":

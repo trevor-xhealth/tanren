@@ -1,4 +1,4 @@
-// The default inbox connector map (GitHub issues + Sentry errors),
+// The default inbox connector map (GitHub/Linear issues + Sentry errors),
 // extracted so BOTH the inbox HTTP route (manual ingest) and the P1d intake
 // poller construct the SAME set of source connectors from one builder — the
 // poll path and the click path read sources identically.
@@ -9,6 +9,13 @@ import type { GitHubHttpClient } from "../../providers/github.js";
 import type { GithubAppTokenMinter } from "../../providers/githubAppTokenMinter.js";
 import { createCiInsightsConnector } from "./ciInsightsConnector.js";
 import { createGitHubIssuesConnector } from "./githubConnector.js";
+import { createIssuesDispatcher } from "./issuesDispatcher.js";
+import {
+  createLinearConnector,
+  FetchLinearHttpClient,
+  type LinearHttpClient,
+  type LinearIntakeAuthority,
+} from "./linearConnector.js";
 import {
   createSentryConnector,
   FetchSentryHttpClient,
@@ -23,6 +30,8 @@ export interface BuildConnectorMapDeps {
   githubHttp: GitHubHttpClient;
   sentryHttp?: SentryHttpClient;
   sentryAuthority?: SentryIntakeAuthority;
+  linearHttp?: LinearHttpClient;
+  linearAuthority?: LinearIntakeAuthority;
   // Intake credential resolution (no-silent-fallbacks fix): the org's GitHub App
   // installation + the shared minter, threaded into the GitHub issues connector so
   // the connector mints an INSTALLATION token. The intake poller builds this map
@@ -41,15 +50,28 @@ export function buildInboxConnectorMap(deps: BuildConnectorMapDeps): Map<string,
   const sentryAuthority: SentryIntakeAuthority =
     deps.sentryAuthority ??
     (() => Promise.reject(new IntakeSourceAuthorityError("sentry", "authority is not configured")));
+  // An unconfigured authority is a LOUD refusal, never a connector that quietly
+  // reads nothing — the same fail-closed default Sentry takes.
+  const linearAuthority: LinearIntakeAuthority =
+    deps.linearAuthority ??
+    (() => Promise.reject(new IntakeSourceAuthorityError("linear", "authority is not configured")));
   return new Map<string, SourceConnector>([
     [
+      // One kind, two providers: the dispatcher resolves `config.provider`.
       "issues",
-      createGitHubIssuesConnector({
-        secrets: deps.secrets,
-        githubHttp: deps.githubHttp,
-        ...(deps.installation === undefined ? {} : { installation: deps.installation }),
-        ...(deps.minter === undefined ? {} : { minter: deps.minter }),
-        ...(deps.defaultGithubStaticRef === undefined ? {} : { defaultStaticRef: deps.defaultGithubStaticRef }),
+      createIssuesDispatcher({
+        github: createGitHubIssuesConnector({
+          secrets: deps.secrets,
+          githubHttp: deps.githubHttp,
+          ...(deps.installation === undefined ? {} : { installation: deps.installation }),
+          ...(deps.minter === undefined ? {} : { minter: deps.minter }),
+          ...(deps.defaultGithubStaticRef === undefined ? {} : { defaultStaticRef: deps.defaultGithubStaticRef }),
+        }),
+        linear: createLinearConnector({
+          secrets: deps.secrets,
+          linearHttp: deps.linearHttp ?? new FetchLinearHttpClient(),
+          authority: linearAuthority,
+        }),
       }),
     ],
     [

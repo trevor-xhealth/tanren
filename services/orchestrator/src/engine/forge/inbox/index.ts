@@ -7,6 +7,8 @@ export {
   InboxSource,
   InboxSourceAttention,
   ActiveGitHubIssuesConfig,
+  ActiveLinearIssuesConfig,
+  ActiveIssuesConfig,
   ActiveSentryConfig,
   parseInboxSourceCreateConfig,
   parsePersistedInboxSourceConfig,
@@ -33,12 +35,29 @@ export {
   IntakeSourceResourceError,
   UnsupportedInboxProviderError,
   assertIntakeResponseOk,
+  assertIssuesProviderIs,
   assertNoSourceCredentialOverride,
   assertSupportedIssuesProvider,
+  resolveIssuesProvider,
   type IntakeSourceProvider,
+  type IssuesProvider,
 } from "./connectorErrors.js";
 
 export { createGitHubIssuesConnector, type GitHubConnectorDeps } from "./githubConnector.js";
+
+export { createIssuesDispatcher, type IssuesDispatcherDeps } from "./issuesDispatcher.js";
+
+export {
+  createLinearConnector,
+  buildPgLinearIntakeAuthority,
+  FetchLinearHttpClient,
+  LINEAR_GRAPHQL_ENDPOINT,
+  type LinearConnectorDeps,
+  type LinearIntakeAuthority,
+  type LinearHttpClient,
+  type LinearHttpRequest,
+  type LinearHttpResponse,
+} from "./linearConnector.js";
 
 export {
   createSentryConnector,

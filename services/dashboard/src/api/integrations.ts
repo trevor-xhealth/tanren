@@ -187,7 +187,7 @@ export interface SelectGrantOutcome {
  * Provider kinds the two-plane UI can link at org level.
  * Hetzner is the allocator plane — NOT this surface.
  */
-export const LINKABLE_PROVIDER_KINDS = ["sentry", "slack", "deploy.vercel", "deploy.flyio"] as const;
+export const LINKABLE_PROVIDER_KINDS = ["sentry", "slack", "linear", "deploy.vercel", "deploy.flyio"] as const;
 
 /**
  * Capabilities the project-enable plane exposes. Deploy requires an explicit
@@ -196,6 +196,7 @@ export const LINKABLE_PROVIDER_KINDS = ["sentry", "slack", "deploy.vercel", "dep
 export const PROJECT_CAPABILITIES = [
   { capability: "errors", label: "error tracking", providerKind: "sentry", glyph: "×" },
   { capability: "notify", label: "slack notify", providerKind: "slack", glyph: "✉" },
+  { capability: "issues", label: "linear intake", providerKind: "linear", glyph: "≡" },
   {
     capability: "deploy",
     label: "deploy · vercel",

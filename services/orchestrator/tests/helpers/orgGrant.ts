@@ -52,6 +52,7 @@ function scopesFor(providerKind: string): string[] {
   // that need a missing-scope state construct it explicitly.
   if (providerKind === "slack") return ["channels:read", "channels:manage", "channels:join", "chat:write"];
   if (providerKind === "sentry") return ["event:read", "project:read", "project:write"];
+  if (providerKind === "linear") return ["read"];
   return [];
 }
 
@@ -60,7 +61,14 @@ export async function testOrgGrant(input: TestGrantInput = {}): Promise<OrgGrant
   const providerKind = input.providerKind ?? "slack";
   const operation = input.operation ?? "provision";
   const capability =
-    input.capability ?? (providerKind === "slack" ? "notify" : providerKind === "sentry" ? "errors" : "deploy");
+    input.capability ??
+    (providerKind === "slack"
+      ? "notify"
+      : providerKind === "sentry"
+        ? "errors"
+        : providerKind === "linear"
+          ? "issues"
+          : "deploy");
   const orgId = input.orgId ?? "org-test";
   const projectId = input.projectId ?? "proj-test";
   const authGeneration = input.authGeneration ?? 1;

@@ -10,6 +10,7 @@ export const INTEGRATION_POLICY_CATALOG_REVISION = "integration-catalog.v3" as c
 export type IntegrationProviderKind =
   | "slack"
   | "sentry"
+  | "linear"
   | "deploy.vercel"
   | "deploy.flyio"
   | "deploy.manual_external"
@@ -92,6 +93,27 @@ const CATALOG: readonly ProviderCatalogEntry[] = [
           { id: "provision", requiredScopes: ["project:write"], plane: "control" },
           { id: "bind", requiredScopes: ["project:read"], plane: "control" },
           { id: "intake", requiredScopes: ["event:read", "project:read"], plane: "control" },
+        ],
+      },
+    ],
+  },
+  {
+    // Linear issue-tracker intake. Read-only: Tanren pulls a workspace's open
+    // issues into the candidate inbox and never writes back, so the entry
+    // deliberately carries NO `provision` operation — there is nothing for
+    // Tanren to create in Linear. Linear's API scope vocabulary is coarse
+    // (`read` covers every read query); never invent a finer scope the
+    // verifier cannot prove.
+    providerKind: "linear",
+    principalKinds: ["organization"],
+    authKinds: ["api_key"],
+    capabilities: [
+      {
+        id: "issues",
+        operations: [
+          { id: "discover", requiredScopes: ["read"], plane: "control" },
+          { id: "bind", requiredScopes: ["read"], plane: "control" },
+          { id: "intake", requiredScopes: ["read"], plane: "control" },
         ],
       },
     ],
