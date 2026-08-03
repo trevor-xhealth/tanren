@@ -10,7 +10,10 @@
 //   POST /orgs/:orgId/github          — connect GitHub (App install OR token).
 //   GET  /orgs/:orgId/github          — the connected identity + its CAPABILITIES
 //                                       (real check: runReady + classified gaps).
-//   GET  /orgs/:orgId/onboarding-status — the single readiness checklist.
+//   GET  /orgs/:orgId/onboarding-status — the single readiness checklist. Its
+//                                       composition (including the ROUTE-AWARE
+//                                       budget-ceiling rule) lives in the sibling
+//                                       `onboardingReadiness.ts`.
 //
 // Org-scoped under RLS (the scoped pool); the writes require org-admin. The
 // secret (App private key / PAT) is NEVER logged or returned — only refs and the
@@ -20,7 +23,6 @@ import { type Context, Hono } from "hono";
 import type pg from "pg";
 import { z } from "zod";
 import type { ActorContext } from "../../auth/schemas.js";
-import { defaultManagedProviderConfig } from "../../engine/config/managedProvider.js";
 import {
   bindOrgGithubCredentialRefs,
   migrateOrgConfig,
@@ -30,7 +32,6 @@ import {
 import type { SecretStore } from "../../engine/contracts/secretStore.js";
 import { loadGithubAppCredential } from "../../engine/credentials/githubApp.js";
 import {
-  describeGithubPermissionGap,
   probeGithubAppCapability,
   probeGithubTokenCapability,
   UNCONNECTED_GITHUB_CAPABILITY,
@@ -48,6 +49,17 @@ import { PgEventStore, type EventStore } from "../../engine/eventStore.js";
 import { GithubAppTokenMinter } from "../../engine/providers/githubAppTokenMinter.js";
 import type { ActorContextEnv } from "../../middleware/auth.js";
 import { actorCanAccessOrg, actorIsOrgAdmin } from "./access.js";
+import {
+  composeOnboardingStatus,
+  ManagedProviderCredentialMissingError,
+  resolveAiProviderStatus,
+  type AiProviderStatus,
+} from "./onboardingReadiness.js";
+
+// Re-exported so existing importers of the readiness surface keep resolving from
+// the route module they already depend on.
+export { ManagedProviderCredentialMissingError };
+export type { OnboardingStatus } from "./onboardingReadiness.js";
 
 export interface GithubConnectRoutesOptions {
   pool: pg.Pool;
@@ -374,115 +386,6 @@ async function emitGithubConfiguredForOrgProjects(
       }),
     ),
   );
-}
-
-interface AiProviderStatus {
-  connected: boolean;
-  classifiedAs?: string;
-}
-
-interface OnboardingStatus {
-  aiProvider: AiProviderStatus;
-  github: { connected: boolean; runReady: boolean; canCreateRepos: boolean };
-  budget: { ceilingUsd: number | null };
-  ready: boolean;
-  /** Steps that MUST be done before the org can run; each one keeps `ready` false. */
-  nextSteps: string[];
-  /** Optional capabilities that are unavailable; these do NOT hold back `ready`. */
-  advisories: string[];
-}
-
-/**
- * Compose the readiness checklist from the org config + the resolved GitHub
- * connection. Read-only; aggregates the EXISTING config reads (AI provider,
- * GitHub, budget) into the single view a non-expert uses to know what is
- * configured and what is missing.
- */
-function composeOnboardingStatus(
-  config: ReturnType<typeof migrateOrgConfig>,
-  github: GithubConnectionStatus,
-  aiProvider: AiProviderStatus,
-): OnboardingStatus {
-  const ceilingUsd = config.defaultBudget?.ceilingUsd ?? null;
-
-  const nextSteps: string[] = [];
-  if (!aiProvider.connected) {
-    nextSteps.push("Connect an AI provider: import a Codex credential (or enable managed provider).");
-  }
-  // Severity decides which list a permission gap lands in. A `run_fatal` gap is a
-  // BLOCKING next step (no run can finish without it); a `feature_blocking` gap is
-  // an advisory (it costs one optional capability, e.g. greenfield repo creation
-  // or issue-sourced intake, and must not hold a working org out of `ready`).
-  const advisories: string[] = [];
-  if (github.connected) {
-    for (const gap of github.permissionGaps) {
-      const target = gap.severity === "run_fatal" ? nextSteps : advisories;
-      target.push(describeGithubPermissionGap(gap));
-    }
-  } else {
-    nextSteps.push("Connect GitHub: POST /orgs/:orgId/github with an App installation or a token.");
-  }
-  if (ceilingUsd === null) {
-    nextSteps.push("Set a default budget ceiling: PUT /orgs/:orgId/budget so runs have a spend cap.");
-  }
-
-  // `nextSteps` is the readiness contract: anything still listed must keep the
-  // org out of the ready state.
-  const ready = nextSteps.length === 0;
-  return {
-    aiProvider,
-    github: { connected: github.connected, runReady: github.runReady, canCreateRepos: github.canCreateRepos },
-    budget: { ceilingUsd },
-    ready,
-    nextSteps,
-    advisories,
-  };
-}
-
-/**
- * The AI-provider connectivity signal from org config. NOT a pure config echo:
- * managed mode is reported connected ONLY after the platform-owned managed
- * credential ref RESOLVES in the SecretStore — a managed org whose platform
- * credential is absent/unresolvable is a LOUD platform-config error
- * ({@link ManagedProviderCredentialMissingError}), never a false `connected:true`.
- * A connected BYOK provider is one whose default LLM routing entry is set.
- * `classifiedAs` names the harness (e.g. "managed", "codex", "claude").
- */
-async function resolveAiProviderStatus(
-  config: ReturnType<typeof migrateOrgConfig>,
-  secrets: SecretStore,
-): Promise<AiProviderStatus> {
-  if (config.providerMode === "managed") {
-    // The platform credential ref/endpoint are DEPLOY config (no per-org override);
-    // resolve the default managed ref and VERIFY it before reporting connected.
-    const ref = defaultManagedProviderConfig().credentialRef;
-    const secret = await secrets.get(ref);
-    if (secret === undefined || secret.value === "") {
-      throw new ManagedProviderCredentialMissingError(ref);
-    }
-    return { connected: true, classifiedAs: "managed" };
-  }
-  const defaultLlm = config.defaultCredentials?.defaultLlm;
-  if (defaultLlm !== undefined) {
-    return { connected: true, classifiedAs: defaultLlm.cli };
-  }
-  return { connected: false };
-}
-
-/**
- * Raised when an org is in `managed` provider mode but the platform-owned managed
- * credential ref resolves to no secret. This is a PLATFORM-config error (the
- * hosting layer failed to provision the managed key), surfaced loud as a
- * `managed_provider_credential_missing` (409) — never a false `connected:true`.
- */
-export class ManagedProviderCredentialMissingError extends Error {
-  constructor(public readonly ref: string) {
-    super(
-      `Managed provider credential ref '${ref}' resolves to no secret in the store: ` +
-        "the platform managed credential is absent/unresolvable, so managed mode is NOT ready.",
-    );
-    this.name = "ManagedProviderCredentialMissingError";
-  }
 }
 
 function requireActor(c: { var: { actor?: ActorContext } }): ActorContext {

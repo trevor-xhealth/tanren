@@ -27,7 +27,12 @@
 // names the remedy. See docs/_design/openrouter-cost-attribution.md.
 import type { BudgetGate } from "../contracts/dagWalker.js";
 import { classifyAuthRef, refKindOf } from "../costs/sources.js";
-import { isCeilingEnforceable, resolveRouteMetering, type RouteMetering } from "../costs/meterability.js";
+import {
+  isCeilingEnforceable,
+  resolveRouteMetering,
+  type RouteMetering,
+  type UnmeterableReason,
+} from "../costs/meterability.js";
 import type { AppendEvent } from "./subtaskLoop.js";
 
 /**
@@ -107,6 +112,92 @@ export async function narrateRouteMetering(
   return metering;
 }
 
+/** The run's (harness × credential × probe) route — everything but the ceiling itself. */
+export type BudgetPreflightRoute = Omit<BudgetPreflightInput, "ceilingUsd">;
+
+/**
+ * Whether a DOLLAR CEILING can be honoured over a route — the SINGLE authority,
+ * with no ceiling value in the question (the answer is a property of the ROUTE).
+ *
+ *  - `enforceable`   — a ceiling both accrues and is judged in real dollars.
+ *  - `unenforceable` — a per_token route with no real-spend capture: the gate would
+ *                      latch permanently on the run's own NULL-cost rows.
+ *  - `unreachable`   — a subscription/self-hosted credential with no usage probe:
+ *                      the ceiling could never fire (silent under-enforcement).
+ *
+ * Extracted so ONBOARDING READINESS asks the same question the run-setup refusal
+ * answers. Before this existed, `GET /onboarding-status` held `ready:false` until a
+ * ceiling was set while {@link assertBudgetCeilingEnforceable} failed that very
+ * configuration closed at setup — the checklist demanded the one setting that made
+ * the stack unrunnable. Readiness and the refusal now cannot disagree, because they
+ * are literally the same function.
+ *
+ * `detail` states WHY in the operator's terms; `remedy` names where spend IS bounded
+ * instead. Both are secret-free (the ref KIND only, never the credential value).
+ */
+export type CeilingEnforceability =
+  | { kind: "enforceable" }
+  | {
+      kind: "unenforceable";
+      refKind: string;
+      reason: UnmeterableReason;
+      detail: string;
+      remedy: string;
+    }
+  | {
+      kind: "unreachable";
+      refKind: string;
+      billingMode: "subscription" | "self_hosted";
+      detail: string;
+      remedy: string;
+    };
+
+/**
+ * Classify a route's ceiling enforceability. PURE — no events, no throw — so a
+ * read-only caller (the onboarding checklist) can consult it without side effects.
+ */
+export function classifyCeilingEnforceability(route: BudgetPreflightRoute): CeilingEnforceability {
+  const refKind = refKindOf(route.authRef);
+  const metering = resolveRouteMetering(route);
+  // `isCeilingEnforceable` is the SEMANTIC gate (one place decides what makes a
+  // ceiling enforceable); the `kind` check is the type narrowing that gives us
+  // `reason`/`detail`. Keeping both means a future third enforceability rule changes
+  // only meterability.ts.
+  if (!isCeilingEnforceable(metering) && metering.kind === "unmeterable") {
+    return {
+      kind: "unenforceable",
+      refKind,
+      reason: metering.reason,
+      detail: metering.detail,
+      remedy:
+        metering.reason === "harness_discards_generation_id"
+          ? "set the spend limit on the OpenRouter API key itself (OpenRouter enforces it at the biller), or remove the tanren dollar ceiling for this project"
+          : "remove the tanren dollar ceiling for this project and cap spend at the provider, whose invoice is the only place this credential's real cost appears",
+    };
+  }
+  // A usage probe reconciles ccusage/credit-drawdown dollars at run end, so a
+  // subscription credential CAN accrue cost — the ceiling is reachable.
+  if (route.hasUsageProbe) {
+    return { kind: "enforceable" };
+  }
+  const classification = classifyAuthRef(route.authRef);
+  // Only subscription / self-hosted credentials have NO per-call dollar basis and
+  // no probe to reconcile one. (An unrecognized ref is handled separately — C1:
+  // cost.unattributed + the fail-closed gate.)
+  if (classification.billingMode !== "subscription" && classification.billingMode !== "self_hosted") {
+    return { kind: "enforceable" };
+  }
+  return {
+    kind: "unreachable",
+    refKind,
+    billingMode: classification.billingMode,
+    detail:
+      "a configured dollar ceiling cannot fire against a subscription/self-hosted credential with no usage probe (no per-call dollar basis)",
+    remedy:
+      "wire a usage probe for this credential (today only a codex writer is probe-covered), or remove the tanren dollar ceiling and bound spend on the subscription plan itself",
+  };
+}
+
 /**
  * Run the ceiling preflight. Emits a loud, secret-free event (naming the ref KIND
  * only) and throws so the run fails CLOSED at setup when either failure mode
@@ -121,61 +212,42 @@ export async function assertBudgetCeilingEnforceable(
   if (input.ceilingUsd === undefined) {
     return;
   }
-  const refKind = refKindOf(input.authRef);
-  const metering = resolveRouteMetering(input);
-  // `isCeilingEnforceable` is the SEMANTIC gate (one place decides what makes a
-  // ceiling enforceable); the `kind` check is the type narrowing that gives us
-  // `reason`/`detail`. Keeping both means a future third enforceability rule changes
-  // only meterability.ts.
-  if (!isCeilingEnforceable(metering) && metering.kind === "unmeterable") {
+  const verdict = classifyCeilingEnforceability(input);
+  if (verdict.kind === "unenforceable") {
     // The DEADLOCK case. Refusing here is strictly better than the alternative:
     // no runner is burned and no uncounted money is spent, and the operator is
     // told the one remedy that actually works.
-    const remedy =
-      metering.reason === "harness_discards_generation_id"
-        ? "set the spend limit on the OpenRouter API key itself (OpenRouter enforces it at the biller), or remove the tanren dollar ceiling for this project"
-        : "remove the tanren dollar ceiling for this project and cap spend at the provider, whose invoice is the only place this credential's real cost appears";
     await appendEvent("cost.ceiling_unenforceable", {
-      refKind,
+      refKind: verdict.refKind,
       cli: input.cli,
       billingMode: "per_token",
       ceilingUsd: input.ceilingUsd,
-      reason: metering.reason,
-      detail: metering.detail,
-      remedy,
+      reason: verdict.reason,
+      detail: verdict.detail,
+      remedy: verdict.remedy,
     });
     throw new UnenforceableBudgetCeilingError({
-      refKind,
+      refKind: verdict.refKind,
       billingMode: "per_token",
       kind: "unenforceable",
       message:
-        `configured dollar ceiling ($${input.ceilingUsd}) cannot be ENFORCED over the ${input.cli} × '${refKind}' ` +
-        `route: ${metering.detail}. Every call therefore records cost_usd = NULL with billing_mode='per_token', ` +
+        `configured dollar ceiling ($${input.ceilingUsd}) cannot be ENFORCED over the ${input.cli} × '${verdict.refKind}' ` +
+        `route: ${verdict.detail}. Every call therefore records cost_usd = NULL with billing_mode='per_token', ` +
         `which the budget gate counts as unpriced spend and fails CLOSED on — and because those rows are the run's ` +
         `OWN, RAISING THE CEILING WILL NOT CLEAR THE PAUSE. Refusing at setup rather than spending uncounted money ` +
-        `and then deadlocking. Remedy: ${remedy}`,
+        `and then deadlocking. Remedy: ${verdict.remedy}`,
     });
   }
-  // A usage probe reconciles ccusage/credit-drawdown dollars at run end, so a
-  // subscription credential CAN accrue cost — the ceiling is reachable.
-  if (input.hasUsageProbe) {
-    return;
-  }
-  const classification = classifyAuthRef(input.authRef);
-  // Only subscription / self-hosted credentials have NO per-call dollar basis and
-  // no probe to reconcile one. (An unrecognized ref is handled separately — C1:
-  // cost.unattributed + the fail-closed gate.)
-  if (classification.billingMode !== "subscription" && classification.billingMode !== "self_hosted") {
+  if (verdict.kind === "enforceable") {
     return;
   }
   await appendEvent("cost.ceiling_unreachable", {
-    refKind,
-    billingMode: classification.billingMode,
+    refKind: verdict.refKind,
+    billingMode: verdict.billingMode,
     ceilingUsd: input.ceilingUsd,
-    reason:
-      "a configured dollar ceiling cannot fire against a subscription/self-hosted credential with no usage probe (no per-call dollar basis)",
+    reason: verdict.detail,
   });
-  throw new UnreachableBudgetCeilingError(refKind, classification.billingMode);
+  throw new UnreachableBudgetCeilingError(verdict.refKind, verdict.billingMode);
 }
 
 /**
