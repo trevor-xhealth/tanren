@@ -132,7 +132,6 @@ function budgetChecklist(ceilingUsd: number | null, route: OrgDefaultRoute | und
     };
   }
   const verdict = classifyCeilingEnforceability(route);
-  const where = `${route.cli} × '${verdict.kind === "enforceable" ? route.authRef : verdict.refKind}'`;
   if (verdict.kind === "enforceable") {
     const reason = `A tanren dollar ceiling IS enforceable over this org's default ${route.cli} route, so runs must carry one.`;
     return ceilingUsd === null
@@ -145,6 +144,9 @@ function budgetChecklist(ceilingUsd: number | null, route: OrgDefaultRoute | und
   }
   // The route cannot honour a ceiling. Asking for one would hand the operator a
   // configuration that dies at run setup, so the checklist asks for the opposite.
+  // Named by the secret-free ref KIND the refusal itself carries — never the full
+  // authRef (whose trailing segment is the credential name).
+  const where = `${route.cli} × '${verdict.refKind}'`;
   const reason =
     `No tanren dollar ceiling is required for this org's default ${where} route — and none can be enforced: ` +
     `${verdict.detail}. Bound spend instead: ${verdict.remedy}. (A project that overrides the routing or its own ` +
