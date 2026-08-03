@@ -18,12 +18,21 @@ export function contentsOf(path: string): string {
   return `contents of ${path}`;
 }
 
+/** How a served tree/file departs from the simple default. */
+export interface TreeServingOptions {
+  /** Pad every served file body out to this many chars (still `contentsOf`-prefixed). */
+  readonly padContentsTo?: number;
+}
+
 /** Serves a synthetic tree + per-file contents, recording what was asked for. */
 export class TreeServingGitHubClient implements GitHubHttpClient {
   /** Paths the reader pulled CONTENT for, in the order it pulled them. */
   readonly contentReads: string[] = [];
 
-  constructor(private readonly treePaths: readonly string[]) {}
+  constructor(
+    private readonly treePaths: readonly string[],
+    private readonly options: TreeServingOptions = {},
+  ) {}
 
   async request(input: GitHubHttpRequest): Promise<GitHubHttpResponse> {
     if (input.path.includes("/git/trees/")) {
@@ -46,10 +55,17 @@ export class TreeServingGitHubClient implements GitHubHttpClient {
       this.contentReads.push(path);
       return {
         status: 200,
-        body: { encoding: "utf-8", content: contentsOf(path) },
+        body: { encoding: "utf-8", content: this.bodyFor(path) },
       };
     }
     return { status: 404, body: {} };
+  }
+
+  /** `contentsOf(path)`, optionally padded so the reader's own byte budget bites. */
+  private bodyFor(path: string): string {
+    const head = contentsOf(path);
+    const padTo = this.options.padContentsTo ?? 0;
+    return head.length >= padTo ? head : `${head}\n${"x".repeat(padTo - head.length - 1)}`;
   }
 }
 
