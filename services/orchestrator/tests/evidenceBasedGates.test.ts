@@ -433,6 +433,43 @@ describe("runGateTier — exit-0 with insufficient evidence FAILS the tier (task
     expect(result.passed).toBe(true);
   });
 
+  it("F-9 retention carve-out: ONLY a stdout-count step keeps full stdout; every other step is bounded", async () => {
+    // A gate step is the largest stream in the system, so steps take head+tail
+    // ("bounded") retention — a 4 000-char tail is all `tailOf(combinedOutput(…))`
+    // ever reads. EXCEPT a `stdout-count` contract, which counts regex matches across
+    // the WHOLE stdout: an elided middle would UNDERCOUNT and fail a PASSING step as
+    // `evidence_insufficient`. That carve-out was documented in a comment and asserted
+    // nowhere, so flipping it would have been a silent false-failure regression.
+    const ssh = new ScriptedSsh((cmd) =>
+      cmd.includes("__TANREN_FILE_ABSENT__") ? { stdout: JUNIT_OK_ONE } : { stdout: "PASS\nPASS\n" },
+    );
+    const { appendEvent } = recordingEvents();
+    const result = await runGateTier({
+      ssh,
+      target,
+      workspacePath: "/ws",
+      tier: "slow",
+      when: "pre_audit",
+      steps: [
+        { name: "count", run: "just count", evidence: { kind: "stdout-count", pattern: "PASS", min: 2 } },
+        {
+          name: "report",
+          run: "just report",
+          evidence: { kind: "junit", reportPath: "reports/junit.xml", minTests: 1 },
+        },
+        { name: "plain", run: "just plain" },
+      ],
+      appendEvent,
+    });
+    expect(result.passed).toBe(true);
+    const retentionOf = (run: string) => ssh.commands.find((c) => c.command.includes(run))?.outputRetention;
+    expect(retentionOf("just count")).toBe("full");
+    // junit/artifact evidence is harvested by a SEPARATE `cat` over SSH, so the step's
+    // OWN stream reads nothing but the tail and stays bounded.
+    expect(retentionOf("just report")).toBe("bounded");
+    expect(retentionOf("just plain")).toBe("bounded");
+  });
+
   it("the parsed JUnit report is exposed on the tier result for downstream per-test ingest reuse (no double-read)", async () => {
     const ssh = new ScriptedSsh((cmd) => (cmd.includes("__TANREN_FILE_ABSENT__") ? { stdout: JUNIT_OK_THREE } : {}));
     const { appendEvent } = recordingEvents();
