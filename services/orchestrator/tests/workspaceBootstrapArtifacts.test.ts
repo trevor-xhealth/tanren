@@ -21,6 +21,7 @@ import {
   commitBootstrapState,
   seedWorkspaceLocalIgnore,
 } from "../src/engine/workspace/bootstrap.js";
+import { WORKSPACE_LOCAL_IGNORE_PATHS } from "../src/engine/workspace/localIgnorePaths.js";
 import { PR_CLEAN_REF, prepareCleanPrBranch } from "../src/engine/workspace/githubPush.js";
 
 const target: RunnerHandle = {
@@ -54,8 +55,8 @@ const timeoutMs = 1_000;
 const workspacePath = "/workspace/runs/run_x/repo";
 
 describe("workspace local git ignore", () => {
-  it("appends node_modules/ and dist/ to the checkout's .git/info/exclude (never a committed file)", async () => {
-    // The durable node_modules guard: a per-checkout ignore so a later `git add -A`
+  it("appends every polyglot build/cache path to the checkout's .git/info/exclude (never a committed file)", async () => {
+    // The durable install-tree guard: a per-checkout ignore so a later `git add -A`
     // (bootstrap commit / writer commit) never sweeps an install tree into the repo
     // — the 46MB checker-prompt failure mode. This must run AFTER clone, so it is a
     // workspace-local exclude rather than a committed `.gitignore`.
@@ -70,9 +71,21 @@ describe("workspace local git ignore", () => {
     expect(cmd).toContain(">>");
     expect(cmd).toContain("info/exclude");
     expect(cmd).not.toContain(".gitignore");
-    // Both ignore paths are written.
-    expect(cmd).toContain("node_modules/");
-    expect(cmd).toContain("dist/");
+    // Every configured path is emitted, single-quoted so glob entries (`*.egg-info/`)
+    // reach git as literals rather than being expanded by the remote shell.
+    for (const path of WORKSPACE_LOCAL_IGNORE_PATHS) {
+      expect(cmd).toContain(`'${path}'`);
+    }
+    // The stack coverage the list has to carry — Node was never the only ecosystem.
+    expect(WORKSPACE_LOCAL_IGNORE_PATHS).toEqual(
+      expect.arrayContaining(["node_modules/", "dist/", ".venv/", "__pycache__/", ".terraform/", ".gradle/"]),
+    );
+    // Ambiguous names (also legitimate SOURCE directory names) are ROOT-ANCHORED, so a
+    // `packages/parser/target/` or `src/build/` of real source is never swallowed.
+    for (const ambiguous of ["/build/", "/target/", "/out/", "/vendor/", "/deps/"]) {
+      expect(WORKSPACE_LOCAL_IGNORE_PATHS).toContain(ambiguous);
+      expect(WORKSPACE_LOCAL_IGNORE_PATHS).not.toContain(ambiguous.slice(1));
+    }
   });
 });
 

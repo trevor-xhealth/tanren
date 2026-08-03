@@ -11,6 +11,7 @@ import { quoteSshShellArg } from "../ssh/command.js";
 import { withAppEnv } from "../ssh/appEnvPrelude.js";
 import { miseProvisionCommand, withMiseActivation } from "../ssh/miseActivate.js";
 import { buildActivityWatchdog } from "../ssh/activityWatchdog.js";
+import { WORKSPACE_LOCAL_IGNORE_PATHS } from "./localIgnorePaths.js";
 import { runWorkspaceSshCommand } from "./ssh.js";
 
 // The commit message used for the synthetic post-bootstrap commit. Install
@@ -351,16 +352,11 @@ function depsInstallFailureMessage(
   return `workspace deps install (${command}) ${reason}${tail}`;
 }
 
-// The paths added to the workspace's LOCAL git ignore (`.git/info/exclude`)
-// right after clone. This is a per-checkout ignore (NOT a committed `.gitignore`)
-// so a later `git add -A` — the bootstrap commit and every writer commit — NEVER
-// sweeps an install/build tree into the repo, regardless of whether the cloned
-// repo ships a `.gitignore`. This is the durable fix for the 46MB checker-prompt
-// failure: a prior gate's `pnpm install` left `node_modules/` in the tree, and
-// `git add -A` committed it, ballooning the writer diff past the model's input
-// limit. The greenfield scaffold ALSO mandates a committed `.gitignore` (so the
-// produced repo is correct); this exclude is the workspace-side belt-and-braces.
-export const WORKSPACE_LOCAL_IGNORE_PATHS = ["node_modules/", "dist/"] as const;
+// The paths added to the workspace's LOCAL git ignore (`.git/info/exclude`) right
+// after clone live in ./localIgnorePaths.ts, which carries the full rationale: the
+// 46MB checker-prompt failure it closes, why it is a per-checkout exclude and NOT a
+// committed `.gitignore`, how it layers UNDER the repo's own `.gitignore`, and why
+// the ambiguous directory names are root-anchored.
 
 export interface SeedWorkspaceLocalIgnoreInput {
   ssh: CommandSubstrate;
@@ -371,7 +367,7 @@ export interface SeedWorkspaceLocalIgnoreInput {
 // Appends WORKSPACE_LOCAL_IGNORE_PATHS to the cloned repo's `.git/info/exclude`
 // (idempotently — duplicate lines there are harmless and git de-dupes the match).
 // Runs over SSH in the workspace dir. Must be called AFTER the clone and BEFORE
-// the first install/commit so no `git add -A` can ever stage node_modules/dist.
+// the first install/commit so no `git add -A` can ever stage an install tree.
 export async function seedWorkspaceLocalIgnore(input: SeedWorkspaceLocalIgnoreInput): Promise<void> {
   const lines = WORKSPACE_LOCAL_IGNORE_PATHS.map((p) => quoteSshShellArg(p)).join(" ");
   await runWorkspaceSshCommand(input.ssh, input.target, {
