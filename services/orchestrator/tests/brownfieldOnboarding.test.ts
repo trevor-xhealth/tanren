@@ -100,7 +100,13 @@ describe("runRecon · read-only recon pre-fills chapters", () => {
     );
     expect(sawIndex?.filesIndexed).toBe(3);
     // Reported on its first turn: no exploration turns, nothing read.
-    expect(exploration).toEqual({ turns: [], filesRead: 0, bytesRead: 0, endedBy: "reported" });
+    expect(exploration).toEqual({
+      turns: [],
+      filesRead: 0,
+      bytesRead: 0,
+      endedBy: "reported",
+      unverifiedCitations: 0,
+    });
     expect(index.repoUrl).toBe(SAMPLE_INDEX.repoUrl);
     expect(report.identity.slug).toBe("tanren-fixture-easy");
     expect(report.gaps).toHaveLength(2);

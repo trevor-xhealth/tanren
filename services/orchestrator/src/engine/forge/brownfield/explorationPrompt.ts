@@ -15,7 +15,11 @@
 //   4. its own NOTES — carried forward turn to turn. This is what lets recon read
 //      more of a repository than fits in one context window: file bodies age out
 //      of the window, the conclusions drawn from them do not;
-//   5. the OBSERVATIONS — the most recent bodies, verbatim, newest kept first.
+//   5. the OBSERVATIONS — the most recent bodies, verbatim, newest kept first;
+//   6. on a COMPLETENESS turn only, the top-level areas it has read nothing
+//      under. See `completenessSection` — that turn exists because the
+//      exploration's fixed point is measured over the evidence corpus and is
+//      therefore blind to WHERE in the repository the reading happened.
 //
 // BUDGET DISCIPLINE. `RECON_PROMPT_MAX_CHARS` bounds ONE turn, not the
 // exploration: the framing (1) and the tail directive are rendered FIRST and are
@@ -24,7 +28,13 @@
 // observation first. What does not fit this turn is asked for in the next one.
 
 import { renderReconEvidence, RECON_PROMPT_MAX_CHARS } from "./prompt.js";
+import { describeExtensions, type ReconArea } from "./reconAreas.js";
 import type { ReconObservation, ReconTurnInput } from "./types.js";
+
+/** Extensions named per area on the completeness turn — enough to identify it. */
+const AREA_EXTENSION_ROWS = 4;
+/** Areas named on one completeness turn, largest first. Rendering width only. */
+const AREA_ROWS = 15;
 
 // How the model addresses the repository. Rendered every turn: an agent that has
 // forgotten the protocol cannot recover by exploring harder.
@@ -55,6 +65,29 @@ const REPORT_DIRECTIVE = [
   "evidence you have actually read — this is reconstruction from evidence, not",
   "invention. The shape section is a rollup, so name the directory or file a",
   "chapter rests on whenever the evidence is structural rather than quoted.",
+  "",
+  // The architecture chapter's own contract. Everything else here is a product
+  // chapter, and `architecture` was answering in that register: two
+  // product-flavoured lines for a repository with a second language, a Terraform
+  // estate and a whole second product in it. The other five chapters are about
+  // WHO uses this and WHAT it does; this one is about WHAT IT IS MADE OF, and it
+  // has to cover the repository rather than the product surface explored first.
+  "`architecture` is the one chapter that is about the REPOSITORY rather than the",
+  "product. It must account for the whole tree, not only the part you explored:",
+  "  • the LANGUAGES and RUNTIMES in use — every ecosystem listed above, not just",
+  "    the largest; a polyglot repository whose report names one language is wrong;",
+  "  • how it is BUILT, tasked and tested (workspace, build and task tooling);",
+  "  • how it is DEPLOYED — infrastructure-as-code, containers, CI;",
+  "  • its DATA layer, if any;",
+  "  • each top-level area substantial enough to matter, by name.",
+  "Cite the path each line rests on. Name a language, tool or service ONLY where a",
+  "path or a file you read shows it: the ecosystem list is path evidence, so what",
+  "you can name from it is fair and what you cannot is not — do NOT name a",
+  "framework, database or cloud you have not seen in a file.",
+  "Where a layer or a substantial area could NOT be characterized from what you",
+  "read, say so explicitly — an `architecture` line that states a layer is present",
+  "but uncharacterized, or a `gap` asking what owns it, is the correct answer. A",
+  "confident guess is not, and neither is silence.",
 ];
 
 const FINALIZE_DIRECTIVE = [
@@ -63,6 +96,42 @@ const FINALIZE_DIRECTIVE = [
   "Write the report from what you have read. Where the evidence was thin, say so in",
   "`risks` or `gaps` rather than inventing — an honest gap is a useful answer.",
 ];
+
+/**
+ * The COMPLETENESS turn: the areas of the repository this exploration has read
+ * nothing under, named.
+ *
+ * The exploration's fixed point says "reading more of what I am reading teaches
+ * me nothing", which is true and is silent about WHERE the reading happened. On
+ * a real monorepo that produced an honest convergence with a third of the tree
+ * untouched. This is the one place recon says so out loud, and it deliberately
+ * asks a QUESTION rather than issuing an order: some of these areas are vendored
+ * drops or generated output that genuinely need no characterizing, and forcing a
+ * read of each would be the "explore everything" loop this must not become. An
+ * answer of "that is a vendor tree, it needs no chapter" is a good answer.
+ */
+function completenessSection(areas: readonly ReconArea[]): string[] {
+  const lines = [
+    "## Areas you have not characterized",
+    "You have stopped learning from what you are reading, but you have read NO file",
+    "content under these top-level areas — largest first:",
+  ];
+  for (const area of areas.slice(0, AREA_ROWS)) {
+    const noun = area.files === 1 ? "file" : "files";
+    lines.push(`- ${area.path} — ${area.files} ${noun} (${describeExtensions(area, AREA_EXTENSION_ROWS)})`);
+  }
+  const hidden = areas.length - Math.min(areas.length, AREA_ROWS);
+  if (hidden > 0) lines.push(`- … +${hidden} further unread areas.`);
+  lines.push(
+    "",
+    "For EACH: either open something under it now (`list` it, then `read` the file",
+    "that describes it) or decide it needs no chapter — a vendored dependency drop,",
+    "generated output, or fixtures. Say which in your notes. If a substantial area",
+    "stays uncharacterized, it belongs in `risks` or `gaps` by name, never omitted.",
+    "Ask for what you want this turn; you are not being asked to finish the repo.",
+  );
+  return lines;
+}
 
 /** One ledger line: what was asked, and what came back. */
 function ledgerLine(observation: ReconObservation): string {
@@ -134,6 +203,10 @@ export function buildReconTurnPrompt(input: ReconTurnInput): string {
   };
 
   if (input.notes !== "") push(`## Your notes so far\n${input.notes}`);
+  // The completeness ask leads the evidence: it is the reason THIS turn exists,
+  // and it is a dozen lines the budget must never trim away underneath it.
+  const unexplored = input.unexploredAreas ?? [];
+  if (unexplored.length > 0) push(completenessSection(unexplored).join("\n"));
   push(renderReconEvidence(input.index));
   if (input.observations.length > 0) {
     push(`## What you have already asked for\n${input.observations.map(ledgerLine).join("\n")}`);

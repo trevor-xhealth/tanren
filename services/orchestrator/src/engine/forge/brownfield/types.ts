@@ -19,6 +19,7 @@
 // the request, like the greenfield capture) so there is NO migration.
 
 import { z } from "zod";
+import type { ReconArea } from "./reconAreas.js";
 
 // ── Repo index (what the read-only Answerer reads) ─────────────────────────
 
@@ -204,6 +205,14 @@ export interface ReconTurnInput {
    * cannot ask for more, which is why the loop provably cannot run forever.
    */
   finalize: boolean;
+  /**
+   * Top-level areas the exploration has read NO file content under. Non-empty
+   * only on a COMPLETENESS turn — the loop reached its evidence fixed point
+   * while part of the repository was still untouched, so it asks about the gap
+   * once before finalizing. An ASK, never a requirement: see `reconAreas.ts` for
+   * why "read everything" would be a worse loop than the defect it fixes.
+   */
+  unexploredAreas?: readonly ReconArea[];
 }
 
 // The read-only Answerer, one turn at a time: given the evidence so far, either

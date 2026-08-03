@@ -6,6 +6,8 @@
 export * from "./types.js";
 export { wrapProviderReconAnswerer, type WrapProviderReconAnswererOptions } from "./providerReconAnswerer.js";
 export { renderReconEvidence, RECON_PROMPT_MAX_CHARS } from "./prompt.js";
+export { uncharacterizedAreas, type ReconArea } from "./reconAreas.js";
+export { reconcileCitations, unresolvedTargets, type ReconciledReport } from "./reconCitations.js";
 export { buildReconTurnPrompt } from "./explorationPrompt.js";
 export { GithubRepoReader, ReconTreeTruncatedError, type GithubRepoReaderInput } from "./githubRepoReader.js";
 export {

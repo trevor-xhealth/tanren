@@ -143,6 +143,27 @@ function matchesAny(lowerPath: string, patterns: readonly string[]): boolean {
   return patterns.some((pattern) => matchesPattern(lowerPath, lowerBase, pattern));
 }
 
+/**
+ * Bind ONE path to the three matching forms documented at the top of this
+ * module, returning a predicate over pattern sets.
+ *
+ * Exported so the ECOSYSTEM catalogue (`reconEcosystems.ts`) recognizes a
+ * manifest the same way the signal-file policy does — one matcher, so "what
+ * counts as a Python project's defining file" cannot mean two different things
+ * in two places.
+ *
+ * The BOUND shape (rather than a plain `matches(path, patterns)`) is what keeps
+ * that catalogue affordable: it tests every path against ~35 pattern sets, on
+ * every turn, over trees of twelve thousand paths. Lower-casing and splitting
+ * the basename once per PATH instead of once per (path × pattern set) is the
+ * difference between one normalization and thirty-five.
+ */
+export function signalPathMatcher(path: string): (patterns: readonly string[]) => boolean {
+  const lower = path.toLowerCase();
+  const base = basenameOf(lower);
+  return (patterns) => patterns.some((pattern) => matchesPattern(lower, base, pattern));
+}
+
 // How many directories deep a path sits (0 == a root-level file).
 function pathDepth(path: string): number {
   return path.split("/").length - 1;

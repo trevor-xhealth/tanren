@@ -101,3 +101,55 @@ export function padded(n: number): string {
 export function upTo(count: number): number[] {
   return Array.from({ length: count }, (_, i) => i + 1);
 }
+
+/**
+ * A synthetic monorepo at REAL scale: a pnpm/turbo JS workspace, a fleet of
+ * Python services, Terraform infrastructure, a docs tree and a vendored drop —
+ * ~12k blobs, the size of the repository that surfaced both the prompt-shape
+ * defect and the architectural-recall one. Shared, because the prompt-shape
+ * suite and the exploration-cost suite must reason about the SAME tree: what
+ * one turn costs and what a whole exploration costs are the two halves of the
+ * same question.
+ */
+export function largeMonorepoTree(): string[] {
+  const paths = [
+    ".gitignore",
+    "Dockerfile",
+    "LICENSE",
+    "Makefile",
+    "README.md",
+    "ROADMAP.md",
+    "package.json",
+    "pnpm-lock.yaml",
+    "pnpm-workspace.yaml",
+    "tsconfig.json",
+    "turbo.json",
+  ];
+  for (const n of upTo(20)) paths.push(`.github/workflows/wf-${padded(n)}.yml`);
+  for (const n of upTo(40)) {
+    const pkg = `packages/pkg-${padded(n)}`;
+    paths.push(`${pkg}/README.md`, `${pkg}/package.json`, `${pkg}/tsconfig.json`);
+    for (const f of upTo(80)) paths.push(`${pkg}/src/mod-${padded(f)}.ts`);
+    for (const f of upTo(30)) paths.push(`${pkg}/tests/mod-${padded(f)}.test.ts`);
+  }
+  for (const n of upTo(40)) {
+    const svc = `services/api-${padded(n)}`;
+    paths.push(`${svc}/README.md`, `${svc}/pyproject.toml`, `${svc}/requirements.txt`);
+    for (const f of upTo(60)) paths.push(`${svc}/src/handler_${padded(f)}.py`);
+    for (const f of upTo(20)) paths.push(`${svc}/tests/test_${padded(f)}.py`);
+  }
+  for (const n of upTo(20)) {
+    const app = `apps/web-${padded(n)}`;
+    paths.push(`${app}/README.md`, `${app}/next.config.js`, `${app}/package.json`);
+    for (const f of upTo(80)) paths.push(`${app}/src/screen-${padded(f)}.tsx`);
+    for (const f of upTo(27)) paths.push(`${app}/tests/screen-${padded(f)}.test.tsx`);
+  }
+  for (const n of upTo(30)) {
+    paths.push(`infra/modules/net-${padded(n)}/main.tf`, `infra/modules/net-${padded(n)}/variables.tf`);
+  }
+  for (const n of upTo(200)) paths.push(`docs/guide-${padded(n)}.md`);
+  for (const n of upTo(60)) {
+    for (const f of upTo(30)) paths.push(`vendor/lib-${padded(n)}/dist/chunk-${padded(f)}.js`);
+  }
+  return paths;
+}

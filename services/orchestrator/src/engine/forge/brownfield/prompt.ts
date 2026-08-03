@@ -19,11 +19,17 @@
 //      that identify its ecosystem, and named example subdirectories. "40
 //      TypeScript packages, 40 Python services, Terraform infra" in a dozen lines
 //      rather than 12,110 literal paths;
-//   3. NOTABLE FILES — ranked signal paths that did not win a content slot, named
+//   3. the ECOSYSTEM CATALOGUE — the same paths, read as NAMES: "Python", "Terraform",
+//      "Turborepo", each beside the manifest that proves it. The rollup's histogram
+//      already carried this information and a real recon still never named a single
+//      one of them, because `.tf 60` is an extension count and "Terraform" is a claim
+//      a calibrated model will not make from it. `reconEcosystems.ts` makes that leap
+//      mechanically, where it is checkable, instead of asking the model to guess;
+//   4. NOTABLE FILES — ranked signal paths that did not win a content slot, named
 //      individually and spread across areas so no one area crowds out the rest;
-//   4. the PREVIEWS, whole.
+//   5. the PREVIEWS, whole.
 //
-// (1) and (3) are why this stays a summary rather than statistics: the model must
+// (1) and (4) are why this stays a summary rather than statistics: the model must
 // still be able to NAME a specific file it wants to reason about, and the agentic
 // pass that navigates from here must have somewhere concrete to go.
 //
@@ -34,6 +40,8 @@
 // content budget plus the single whole-prompt bound below — the same idiom every
 // sibling authorer carries (`FRAGMENT_AUTHORER_PROMPT_MAX_CHARS` and friends).
 
+import { byCountThenName, comparePaths, describeExtensions, rollUpAreas, type ReconArea } from "./reconAreas.js";
+import { renderEcosystems } from "./reconEcosystems.js";
 import { rankSignalPaths } from "./reconSignalFiles.js";
 import type { ReconIndex, ReconIndexedFile } from "./types.js";
 
@@ -58,72 +66,12 @@ const ROOT_FILE_ROWS = 60;
 const NOTABLE_FILE_ROWS = 40;
 const NOTABLE_FILES_PER_AREA = 4;
 
-const NO_EXTENSION = "(no extension)";
-
-// Ordering tiebreak by CODE UNIT rather than `localeCompare`, for the same reason
-// the signal-file policy does it: a locale-sensitive collation would make the
-// rendered prompt depend on the host recon happens to run on.
-function comparePaths(left: string, right: string): number {
-  return left < right ? -1 : left > right ? 1 : 0;
-}
-
-/** Most-frequent first, then by name — the same order on every host. */
-function byCountThenName(left: readonly [string, number], right: readonly [string, number]): number {
-  return right[1] - left[1] || comparePaths(left[0], right[0]);
-}
-
-function extensionOf(path: string): string {
-  const basename = path.slice(path.lastIndexOf("/") + 1);
-  const dot = basename.lastIndexOf(".");
-  return dot <= 0 ? NO_EXTENSION : basename.slice(dot).toLowerCase();
-}
-
-function bump(counts: Map<string, number>, key: string): void {
-  counts.set(key, (counts.get(key) ?? 0) + 1);
-}
-
-/** One top-level area of the repo, plus the shape of what lives under it. */
-interface AreaRollup {
-  readonly path: string;
-  files: number;
-  readonly extensions: Map<string, number>;
-  /** Depth-2 directories under this area → files at or below each. */
-  readonly children: Map<string, number>;
-}
-
-function rollUpAreas(files: readonly ReconIndexedFile[]): AreaRollup[] {
-  const areas = new Map<string, AreaRollup>();
-  for (const file of files) {
-    const segments = file.path.split("/");
-    const top = segments[0] ?? "";
-    // Root files carry no directory of their own; they are listed verbatim.
-    if (segments.length < 2 || top === "") continue;
-    let area = areas.get(top);
-    if (area === undefined) {
-      area = { path: top, files: 0, extensions: new Map(), children: new Map() };
-      areas.set(top, area);
-    }
-    area.files += 1;
-    bump(area.extensions, extensionOf(file.path));
-    if (segments.length > 2) bump(area.children, `${top}/${segments[1] ?? ""}`);
-  }
-  return [...areas.values()].sort((left, right) => right.files - left.files || comparePaths(left.path, right.path));
-}
-
-function renderExtensions(extensions: Map<string, number>): string {
-  return [...extensions.entries()]
-    .sort(byCountThenName)
-    .slice(0, EXTENSION_ROWS)
-    .map(([extension, count]) => `${extension} ${count}`)
-    .join(", ");
-}
-
-function renderArea(area: AreaRollup): string[] {
+function renderArea(area: ReconArea): string[] {
   const children = [...area.children.entries()].sort(byCountThenName);
   const plural = children.length === 1 ? "directory" : "directories";
   const scope = children.length === 0 ? "" : ` in ${children.length} ${plural}`;
   const noun = area.files === 1 ? "file" : "files";
-  const lines = [`- ${area.path} — ${area.files} ${noun} (${renderExtensions(area.extensions)})${scope}`];
+  const lines = [`- ${area.path} — ${area.files} ${noun} (${describeExtensions(area, EXTENSION_ROWS)})${scope}`];
   if (children.length === 0) return lines;
   const named = children.slice(0, CHILD_DIRECTORY_ROWS).map(([path, count]) => `${path} (${count})`);
   const hidden = children.length - named.length;
@@ -131,8 +79,8 @@ function renderArea(area: AreaRollup): string[] {
   return lines;
 }
 
-function renderRollup(files: readonly ReconIndexedFile[]): string[] {
-  const areas = rollUpAreas(files);
+function renderRollup(paths: readonly string[]): string[] {
+  const areas = rollUpAreas(paths);
   const lines = areas.slice(0, TOP_LEVEL_ROWS).flatMap((area) => renderArea(area));
   const hidden = areas.slice(TOP_LEVEL_ROWS);
   if (hidden.length > 0) {
@@ -188,14 +136,16 @@ function renderPreviews(files: readonly ReconIndexedFile[], ranked: readonly str
 /**
  * The entry-point evidence block: what recon can see about a repository before
  * it has asked for anything. Root files verbatim, the directory rollup, the
- * notable paths it has NOT read, and the seed previews.
+ * ecosystems those paths name, the notable paths it has NOT read, and the seed
+ * previews.
  *
  * UNBOUNDED here on purpose — the single turn bound lives in
  * `explorationPrompt.ts`, which composes this with the framing it must never cut.
  */
 export function renderReconEvidence(index: ReconIndex): string {
   if (index.files.length === 0) return "(no files indexed)";
-  const ranked = rankSignalPaths(index.files.map((file) => file.path));
+  const paths = index.files.map((file) => file.path);
+  const ranked = rankSignalPaths(paths);
   const notable = notableFiles(index.files, ranked);
   const lines = [
     "## Root files",
@@ -204,8 +154,14 @@ export function renderReconEvidence(index: ReconIndex): string {
     "## Repository shape",
     "One line per top-level directory: files at or below it, its most common file",
     "extensions, and named example subdirectories. Counts cover the whole tree.",
-    ...renderRollup(index.files),
+    ...renderRollup(paths),
   ];
+  // The ecosystem catalogue turns that extension histogram into NAMES. It is a
+  // mechanical derivation from the same paths, so it adds no claim the rollup
+  // did not already contain — it just says it in the vocabulary the
+  // `architecture` chapter has to be written in. See `reconEcosystems.ts`.
+  const ecosystems = renderEcosystems(paths);
+  if (ecosystems.length > 0) lines.push("", ...ecosystems);
   if (notable.length > 0) {
     lines.push("", "## Other notable files (indexed by path; contents NOT read)", ...notable);
   }
