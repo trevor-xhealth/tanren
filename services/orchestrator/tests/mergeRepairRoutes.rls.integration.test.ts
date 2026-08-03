@@ -18,6 +18,14 @@ const APP_PASSWORD = process.env["TANREN_APP_DB_PASSWORD"] ?? "tanren_app";
 const ORG_A = "org_mq10_a";
 const ORG_B = "org_mq10_b";
 const PROJECT_A = "project_mq10_a";
+// One stuck parent per SpecMode arm. A re-spec INHERITS its parent's authoring mode, so all
+// three are pinned here — including `from_scratch`, whose expected value is unchanged, so
+// that "inherit" is proven to be inheritance rather than a hardcode that happens to agree.
+const MODE_PARENTS = [
+  ["spec_mode_from_scratch", "from_scratch"],
+  ["spec_mode_specialize_seed", "specialize_seed"],
+  ["spec_mode_modify_existing", "modify_existing"],
+] as const;
 
 function dbName(): string {
   return `tanren_mq10_${Date.now()}_${Math.floor(Math.random() * 1e6)}`;
@@ -80,6 +88,20 @@ describeDb("mq-10 autonomous-repair router under tanren_app RLS", () => {
         `INSERT INTO runs (run_id, spec_id, project_id, org_id, trigger, branch, status)
          VALUES ($1, $2, $3, $4, 'ci', $1, 'completed')`,
         [runId, specId, PROJECT_A, ORG_A],
+      );
+    }
+    // One PARENT spec per SpecMode arm, so the mode-inheritance proof below runs against a
+    // real `specs.mode` column (the DB CHECK enumerates the three literals).
+    for (const [specId, mode] of MODE_PARENTS) {
+      await ownerPool.query(
+        `INSERT INTO specs (spec_id, project_id, org_id, title, description, status, mode)
+         VALUES ($1, $2, $3, $1, 'mq-10 mode fixture', 'in_flight', $4)`,
+        [specId, PROJECT_A, ORG_A, mode],
+      );
+      await ownerPool.query(
+        `INSERT INTO runs (run_id, spec_id, project_id, org_id, trigger, branch, status)
+         VALUES ($1, $2, $3, $4, 'ci', $1, 'completed')`,
+        [`run_${specId}`, specId, PROJECT_A, ORG_A],
       );
     }
     router = new PgAutonomousRepairRouter({ pool: appPool, events: new PgEventStore(appPool) });
@@ -180,6 +202,55 @@ describeDb("mq-10 autonomous-repair router under tanren_app RLS", () => {
       ),
     );
     expect(rows.rows.map((r) => r.disposition)).toEqual(["blocked_needs_attention"]);
+  });
+
+  // THE MODE-INHERITANCE PROOF, on the real merge transaction. `materializeReplacementSpec`
+  // runs inside the SAME `runWithOrgScope` transaction as the routing decision and the route
+  // row, so the parent's mode is read there too — never in a separate connection that could
+  // observe a torn state. The replacement's mode is read back from `specs` with a SELECT: the
+  // defect was in what got WRITTEN, so the return value alone would not have caught it.
+  //
+  // Against the unfixed router (a hardcoded `mode: "from_scratch"` in
+  // `materializeReplacementSpec`) the `modify_existing` and `specialize_seed` cases FAIL —
+  // a brownfield spec silently reverting to rebuild-the-world mode on its first re-spec,
+  // against a real, pre-existing repository, at the moment the system is already struggling.
+  it.each(MODE_PARENTS)("a %s parent re-specs into a replacement persisted at mode=%s", async (specId, mode) => {
+    const signature = canonicalFailureSignature(["audit_policy"], ["f1"]);
+    for (let n = 0; n < 2; n += 1) {
+      await ownerPool.query(
+        `INSERT INTO merge_repair_routes
+           (org_id, route_id, project_id, source_spec_id, group_id, evaluation_id, disposition, failure_class,
+            failure_signature, magnitude, finding_ids, reason_codes)
+         VALUES ($1,$2,$3,$4,$5,$6,'repair_in_place','deterministic_policy',$7,1,'{f1}','{audit_policy}')`,
+        [ORG_A, `mrr_prior_${specId}_${n}`, PROJECT_A, specId, mqgrp(), mqeval(), signature],
+      );
+    }
+    const outcome = await router.routeMemberFailure({
+      projectId: PROJECT_A,
+      groupId: mqgrp(),
+      evaluationId: mqeval(),
+      sourceSpecId: specId,
+      runId: `run_${specId}`,
+      classification: "deterministic_policy",
+      findingIds: ["f1"],
+      reasonCodes: ["audit_policy"],
+    });
+    expect(outcome.kind).toBe("respec");
+
+    // The PERSISTED mode of the replacement row — the value a writer will actually be given.
+    const replacement = await runWithOrgScope(appPool, ORG_A, (client) =>
+      client.query<{ mode: string }>(`SELECT mode FROM specs WHERE parent_spec_id = $1`, [specId]),
+    );
+    expect(replacement.rows.map((r) => r.mode)).toEqual([mode]);
+
+    // OBSERVABILITY: the mode is on the wire too, so the change is never silent.
+    const events = await runWithOrgScope(appPool, ORG_A, (client) =>
+      client.query<{ payload: { specMode?: string } }>(
+        `SELECT payload FROM events WHERE event_type = 'merge.member.respec_routed' AND spec_id = $1`,
+        [specId],
+      ),
+    );
+    expect(events.rows.map((r) => r.payload.specMode)).toEqual([mode]);
   });
 
   it("denies cross-org reads: org B sees ZERO of org A's repair routes", async () => {
