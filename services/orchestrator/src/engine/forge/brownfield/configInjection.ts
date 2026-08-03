@@ -23,14 +23,61 @@ import {
 } from "../scaffold/index.js";
 import type { ReconReport } from "./types.js";
 
+/**
+ * How the write seam reconciles a proposed file with one the target repository ALREADY
+ * owns. Config injection writes into somebody else's repo, so "what happens when the file
+ * is already there" is a property of the PROPOSAL — declared next to the content, visible
+ * in review, and testable without a forge — never a special case buried in the writer.
+ *
+ * - `replace`          — tanren owns the file outright; overwrite whatever is there.
+ * - `append_if_absent` — additive: keep the repository's content, append only the lines
+ *                        it does not already have (`.gitignore`).
+ * - `skip_if_present`  — the repository owns it; write ONLY when it does not exist.
+ *
+ * `skip_if_present` is the conservative default for anything a real repo plausibly has:
+ * replacing such a file is silent data loss (a wiped `.gitignore` makes the writer's
+ * `git add -A` commit the whole install tree on the next iteration).
+ */
+export type FileMergeStrategy = "replace" | "append_if_absent" | "skip_if_present";
+
 // The six files the config-injection PR proposes. `path` is the repo path;
-// `kind` tags the snapshot file specially (regenerated only via the audit gate).
+// `merge` is how the writer reconciles it with an existing file at that path.
 export interface ProposedFile {
   path: string;
   content: string;
   addedLines: number;
+  /** How to reconcile with a file the repository already has at `path`. */
+  merge: FileMergeStrategy;
   /** The `.tanren/PROJECT.md` one-time snapshot (don't-edit-by-hand). */
   snapshot?: boolean;
+}
+
+/**
+ * The bytes to write for `file` given what the repository currently holds at its path
+ * (`existing`; `undefined` when the repo has no such file). Returning `undefined` means
+ * WRITE NOTHING — the repository's copy stands untouched. Pure, so the write seam calls
+ * it with the bytes it read and tests call it directly.
+ */
+export function mergeFileContent(
+  file: { content: string; merge: FileMergeStrategy },
+  existing: string | undefined,
+): string | undefined {
+  if (existing === undefined || file.merge === "replace") return file.content;
+  if (file.merge === "skip_if_present") return undefined;
+  return appendMissingLines(existing, file.content);
+}
+
+/**
+ * `existing` plus every non-blank line of `addition` it does not already carry, appended
+ * verbatim. `undefined` when the addition is fully present (nothing to write). Line
+ * membership is compared trimmed so indentation/CRLF noise never duplicates a rule.
+ */
+function appendMissingLines(existing: string, addition: string): string | undefined {
+  const present = new Set(existing.split("\n").map((line) => line.trim()));
+  const missing = addition.split("\n").filter((line) => line.trim() !== "" && !present.has(line.trim()));
+  if (missing.length === 0) return undefined;
+  const base = existing === "" || existing.endsWith("\n") ? existing : `${existing}\n`;
+  return `${base}\n${missing.join("\n")}\n`;
 }
 
 export interface ProposeFilesInput {
@@ -115,6 +162,10 @@ function codeowners(team: string): string {
 `;
 }
 
+// tanren's `.gitignore` contribution. Leads with a blank line so it reads correctly when
+// appended to a repo's existing rules (the only file injection extends rather than owns).
+const TANREN_GITIGNORE = "\n# tanren\n.tanren/cache/\n";
+
 function countLines(content: string): number {
   return content.split("\n").length;
 }
@@ -138,16 +189,23 @@ export function proposeConfigFiles(input: ProposeFilesInput, excludePaths: Reado
       path: ".tanren/PROJECT.md",
       content: snapshot,
       addedLines: countLines(snapshot),
+      // tanren's own namespace + explicitly "don't edit by hand, regenerated via the
+      // audit gate" — the ONE file config injection owns outright.
+      merge: "replace",
       snapshot: true,
     },
     {
       path: SKELETON_CI_CONFIG_PATH,
       content: TANREN_CI_CONFIG,
       addedLines: countLines(TANREN_CI_CONFIG),
+      // A repo can EDIT this file to change what the gate runs (see the header), so a
+      // re-injection must never silently revert the operator's gate definition.
+      merge: "skip_if_present",
     },
-    // The stack-agnostic justfile skeleton — only when the repo ships none. It
-    // gives the injected ci.yml's `just <target>` steps something to defer to; the
-    // operator fills in the stubs for their stack (or excludes it pre-PR).
+    // The stack-agnostic justfile skeleton. `skip_if_present`: the repo's own lifecycle
+    // is authoritative — the LOUD-STUB targets would fail every tier if they landed on
+    // top of it. When the repo ships none, this seeds something for the injected ci.yml's
+    // `just <target>` steps to defer to (the operator fills in the stubs for their stack).
     ...(input.repoHasJustfile === true
       ? []
       : [
@@ -155,18 +213,32 @@ export function proposeConfigFiles(input: ProposeFilesInput, excludePaths: Reado
             path: SKELETON_JUSTFILE_PATH,
             content: SKELETON_JUSTFILE,
             addedLines: countLines(SKELETON_JUSTFILE),
+            merge: "skip_if_present" as const,
           },
         ]),
-    { path: "CODEOWNERS", content: codeowners(team), addedLines: countLines(codeowners(team)) },
+    {
+      path: "CODEOWNERS",
+      content: codeowners(team),
+      addedLines: countLines(codeowners(team)),
+      // A blanket `* @org/tanren-operators` would erase per-directory ownership — the
+      // repo's review routing. Only scaffold it when the repo has none.
+      merge: "skip_if_present",
+    },
     {
       path: ".gitignore",
-      content: "\n# tanren\n.tanren/cache/\n",
-      addedLines: 3,
+      content: TANREN_GITIGNORE,
+      addedLines: countLines(TANREN_GITIGNORE),
+      // ADDITIVE — the one file we extend rather than own. Replacing it would drop the
+      // rules keeping node_modules/, .venv/, dist/, … out of the index, and tanren's
+      // writer runs `git add -A`: the next iteration would commit the whole install tree.
+      merge: "append_if_absent",
     },
     {
       path: ".github/PULL_REQUEST_TEMPLATE.md",
       content: "## summary\n\n## spec\n\n<!-- tanren spec link -->\n",
       addedLines: 4,
+      // A repo's PR template often carries compliance checklists. Never overwrite it.
+      merge: "skip_if_present",
     },
   ];
   const excluded = new Set(excludePaths);
@@ -179,7 +251,10 @@ export interface InjectedConfigPullRequest {
   number: number;
   url: string;
   branch: string;
+  /** The files the PR actually WROTE — never the proposal list. */
   filesCommitted: ReadonlyArray<string>;
+  /** Proposed files the repository already owned, so the writer stood down. */
+  filesSkipped?: ReadonlyArray<string>;
 }
 
 // Port the engine opens the PR through. Production wires the App-backed adapter;
@@ -191,7 +266,9 @@ export interface ConfigInjectionGitHub {
     headBranch: string;
     title: string;
     body: string;
-    files: ReadonlyArray<{ path: string; content: string }>;
+    // `merge` rides along so the write seam can honor the proposal's strategy — it is
+    // the only place that knows what the target repo currently holds at each path.
+    files: ReadonlyArray<{ path: string; content: string; merge: FileMergeStrategy }>;
   }): Promise<InjectedConfigPullRequest>;
 }
 
@@ -215,11 +292,14 @@ export async function openConfigInjectionPr(input: OpenConfigInjectionInput): Pr
     throw new Error("config-injection PR needs at least one file (all were excluded)");
   }
   const headBranch = input.headBranch ?? DEFAULT_HEAD_BRANCH;
-  const fileList = input.files.map((f) => `- \`${f.path}\``).join("\n");
+  const fileList = input.files.map((f) => `- \`${f.path}\` · ${f.merge}`).join("\n");
   const body = [
     "Tanren integration files, proposed from the read-only recon pass.",
     "",
     "**No runs happen until this PR is merged.** Comment, edit, or close like any other PR.",
+    "",
+    "A file this repo already owns is never overwritten: `skip_if_present` files are left",
+    "alone, `append_if_absent` files only gain the lines they are missing.",
     "",
     "Files:",
     fileList,
@@ -230,6 +310,6 @@ export async function openConfigInjectionPr(input: OpenConfigInjectionInput): Pr
     headBranch,
     title: "tanren · integration config",
     body,
-    files: input.files.map((f) => ({ path: f.path, content: f.content })),
+    files: input.files.map((f) => ({ path: f.path, content: f.content, merge: f.merge })),
   });
 }
