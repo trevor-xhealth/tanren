@@ -31,10 +31,27 @@ export function isCanonicalConfigRevisionToken(value: string): boolean {
   }
 }
 
+/**
+ * The one rejection message for every bad revision token, WRONG-TYPE INCLUDED.
+ *
+ * A bare `z.string().refine(...)` never reaches its refine message on a NUMBER
+ * input — zod stops at the type check and reports "expected string, received
+ * number", which reads like an arbitrary API quirk when the caller is copying a
+ * value straight out of `GET`'s JSON. It is not a quirk: `config_revision` is a
+ * BIGINT, so it crosses the wire as a decimal STRING in BOTH directions (GET
+ * returns `"7"`, PUT/PATCH require `"7"`) precisely so a value above 2^53 cannot
+ * be silently rounded by a JSON number. Attaching the message to the string
+ * schema itself makes the round-trip rule the thing the caller is actually told.
+ */
+const CONFIG_REVISION_MESSAGE =
+  `config_revision must be the canonical decimal STRING token returned by GET (e.g. "7") — not a JSON number: ` +
+  `the column is BIGINT and a number would lose precision above 2^53. Send back exactly the value you read, ` +
+  `an integer in [${CONFIG_REVISION_MIN}, ${CONFIG_REVISION_MAX}] with no sign, leading zero, or exponent.`;
+
 /** Decimal string of the row's config_revision (stable external CAS token). */
-export const ConfigRevisionSchema = z.string().refine(isCanonicalConfigRevisionToken, {
-  message: `config_revision must be a canonical decimal integer in [${CONFIG_REVISION_MIN}, ${CONFIG_REVISION_MAX}]`,
-});
+export const ConfigRevisionSchema = z
+  .string({ error: CONFIG_REVISION_MESSAGE })
+  .refine(isCanonicalConfigRevisionToken, { message: CONFIG_REVISION_MESSAGE });
 export type ConfigRevision = z.infer<typeof ConfigRevisionSchema>;
 
 export interface ConfigSnapshot {

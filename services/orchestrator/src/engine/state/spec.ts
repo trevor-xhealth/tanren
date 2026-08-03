@@ -8,8 +8,19 @@ import { z } from "zod";
  * persisted onto the spec at create time. `priorityRank` maps it to a sortable
  * integer (lower = scheduled first); the DB CHECK in `db/src/schemaCore.ts`
  * mirrors these literals. `tbd` means not-yet-triaged and sorts last.
+ *
+ * CASE-SENSITIVE, deliberately — `"p2"` is rejected, not coerced. The vocabulary is
+ * MIXED case (`P0`/`P1`/`P2` uppercase, `tbd` lowercase), so there is no single
+ * case fold that normalizes it: any "be forgiving" rule would have to special-case
+ * `tbd`, and a normalizer that silently repairs one class of typo teaches callers
+ * to trust it for the ones it cannot repair. The literals are also the DB CHECK's
+ * literals, so the API vocabulary and the storage vocabulary stay the same strings.
+ * The message below therefore names the accepted tokens EXACTLY and says the
+ * comparison is case-sensitive, so a caller who sent `"p2"` can see why it failed.
  */
-export const SpecPriority = z.enum(["P0", "P1", "P2", "tbd"]);
+export const SpecPriority = z.enum(["P0", "P1", "P2", "tbd"], {
+  error: 'spec priority is case-sensitive and must be exactly one of "P0", "P1", "P2", "tbd" (not "p2"/"TBD")',
+});
 export type SpecPriority = z.infer<typeof SpecPriority>;
 
 /** The default priority a not-yet-triaged spec carries (matches the DB column default). */
