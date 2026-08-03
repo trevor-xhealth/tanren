@@ -1,10 +1,10 @@
-// P1c: the brownfield-recon prompt builder.
+// P1c: the brownfield-recon ENTRY-POINT evidence renderer.
 //
-// Renders the prompt handed to a provider Answerer to read a repo index (the
-// files the `RepoReader` indexed READ-ONLY) and infer the project's chapters —
-// identity, personas, behaviors, architecture, risks, gaps. The grounding read
-// (the index) feeds the model as context; the model produces the `ReconReport`.
-// Asks for exactly one report; the strict output schema enforces the rest.
+// Renders what recon knows about a repo BEFORE it has explored anything: the
+// index the `RepoReader` built READ-ONLY, summarized the way an engineer reads
+// an unfamiliar repo in the first 30 seconds. `explorationPrompt.ts` wraps this
+// in the per-turn framing; the model navigates OUT from here (`recon.ts`), so
+// this block is the map, not the territory.
 //
 // SHAPE. `ReconIndex.files` is the WHOLE tree: `githubRepoReader` pushes every
 // blob path-only and only the ranked signal files carry a preview. Emitting one
@@ -24,8 +24,8 @@
 //   4. the PREVIEWS, whole.
 //
 // (1) and (3) are why this stays a summary rather than statistics: the model must
-// still be able to NAME a specific file it wants to reason about, and a later
-// agentic pass must have somewhere concrete to navigate to.
+// still be able to NAME a specific file it wants to reason about, and the agentic
+// pass that navigates from here must have somewhere concrete to go.
 //
 // PREVIEWS ARE RENDERED WHOLE. This module used to slice each preview to 1200
 // chars while the reader fetched 4 KiB per signal file, so 71% of the content
@@ -38,10 +38,14 @@ import { rankSignalPaths } from "./reconSignalFiles.js";
 import type { ReconIndex, ReconIndexedFile } from "./types.js";
 
 /**
- * Defensive hard cap on the total prompt size (chars). Sized to clear the
- * reader's structural content budget (24 signal files × 4 KiB ≈ 98k) with room
- * for the rollup and the framing, so in practice it never bites — it exists so a
- * drifting or hostile index cannot hand the Answerer an unbounded prompt.
+ * Defensive hard cap on ONE TURN's prompt size (chars). Sized to clear the
+ * entry point's seed content (24 signal files × 4 KiB ≈ 98k) with room for the
+ * rollup and the framing.
+ *
+ * This bounds a SINGLE TURN, never the exploration: what does not fit in this
+ * turn is asked for in the next one. It exists so a drifting or hostile index —
+ * or a turn's worth of observations — cannot hand the Answerer an unbounded
+ * prompt, not to limit how much of a repository recon may read.
  */
 export const RECON_PROMPT_MAX_CHARS = 120_000;
 
@@ -181,44 +185,30 @@ function renderPreviews(files: readonly ReconIndexedFile[], ranked: readonly str
   return previewed.map((file) => `### ${file.path} (${file.size} bytes)\n${file.preview}`).join("\n\n");
 }
 
-export function buildReconPrompt(index: ReconIndex): string {
+/**
+ * The entry-point evidence block: what recon can see about a repository before
+ * it has asked for anything. Root files verbatim, the directory rollup, the
+ * notable paths it has NOT read, and the seed previews.
+ *
+ * UNBOUNDED here on purpose — the single turn bound lives in
+ * `explorationPrompt.ts`, which composes this with the framing it must never cut.
+ */
+export function renderReconEvidence(index: ReconIndex): string {
+  if (index.files.length === 0) return "(no files indexed)";
   const ranked = rankSignalPaths(index.files.map((file) => file.path));
   const notable = notableFiles(index.files, ranked);
   const lines = [
-    "You are Forge, running a READ-ONLY reconnaissance of an existing (brownfield)",
-    "repository to reconstruct its product chapters before tanren onboards it.",
-    `Repository: ${index.repoUrl} (${index.filesIndexed} files indexed)`,
-  ];
-  if (index.files.length === 0) {
-    lines.push("", "(no files indexed)");
-  } else {
-    lines.push(
-      "",
-      "## Root files",
-      renderRootFiles(index.files),
-      "",
-      "## Repository shape",
-      "One line per top-level directory: files at or below it, its most common file",
-      "extensions, and named example subdirectories. Counts cover the whole tree.",
-      ...renderRollup(index.files),
-    );
-    if (notable.length > 0) {
-      lines.push("", "## Other notable files (indexed by path; contents NOT read)", ...notable);
-    }
-    lines.push("", "## File previews (highest-signal files, as fetched)", renderPreviews(index.files, ranked));
-  }
-  lines.push(
+    "## Root files",
+    renderRootFiles(index.files),
     "",
-    "Return exactly one ReconReport: infer `identity` (slug + purpose, with",
-    "`inferredFrom` naming the evidence), `personas`, `behaviors`, `architecture`,",
-    "`risks`, and `gaps` (what's missing / under-tested). Ground every chapter in",
-    "the evidence above — this is reconstruction from evidence, not invention. The",
-    "shape section is a rollup, so name the directory or file a chapter rests on",
-    "whenever the evidence is structural rather than quoted.",
-  );
-  const rendered = lines.join("\n");
-  if (rendered.length > RECON_PROMPT_MAX_CHARS) {
-    return rendered.slice(0, RECON_PROMPT_MAX_CHARS) + "\n// … (prompt truncated at cap)\n";
+    "## Repository shape",
+    "One line per top-level directory: files at or below it, its most common file",
+    "extensions, and named example subdirectories. Counts cover the whole tree.",
+    ...renderRollup(index.files),
+  ];
+  if (notable.length > 0) {
+    lines.push("", "## Other notable files (indexed by path; contents NOT read)", ...notable);
   }
-  return rendered;
+  lines.push("", "## File previews (highest-signal files, as fetched)", renderPreviews(index.files, ranked));
+  return lines.join("\n");
 }

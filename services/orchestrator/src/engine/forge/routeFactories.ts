@@ -26,7 +26,7 @@ import type { DesignAgent } from "../design/designAgent.js";
 import type { InterviewAnswerer } from "./interview/index.js";
 import type { DiscoveryAnswerer } from "./discovery/index.js";
 import type { TriageAnswerer } from "./inbox/index.js";
-import type { ReconAnswerer } from "./brownfield/index.js";
+import type { ReconTurnAnswerer } from "./brownfield/index.js";
 import { createAnswererPassRunner, type AuditAnswerer, type AuditPassRunner } from "./audits/index.js";
 import type { ForgeConversationAnswerer } from "./conversation/index.js";
 import type { GitHubHttpClient } from "../providers/github.js";
@@ -42,7 +42,7 @@ export interface ForgeRouteAnswererFactories {
   designAgent: (target: ForgeAnswererTarget) => DesignAgent;
   discovery: (target: ForgeAnswererTarget) => DiscoveryAnswerer;
   triage: (target: ForgeAnswererTarget) => TriageAnswerer;
-  recon: (target: ForgeAnswererTarget) => ReconAnswerer;
+  recon: (target: ForgeAnswererTarget) => ReconTurnAnswerer;
   audit: (target: ForgeAnswererTarget) => AuditAnswerer;
   conversation: (target: ForgeAnswererTarget) => ForgeConversationAnswerer;
   /** F2 — per-fragment authoring (docs/roadmap/templating-system.md): a real

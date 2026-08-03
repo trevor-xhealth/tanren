@@ -1,5 +1,8 @@
 // Brownfield recon PROMPT-SHAPE tests.
 //
+// These run over the ENTRY-POINT turn (turn zero of the exploration: nothing
+// observed yet), which is where the whole tree has to be summarized.
+//
 // The recon prompt used to render one `### <path> (<n> bytes)` header for EVERY
 // blob in the tree — and `ReconIndex.files` is the WHOLE tree (only the ranked
 // signal files carry a preview). On a real 12k-file monorepo that is ~1.1 MB of
@@ -15,7 +18,9 @@
 // fixture), so these assertions run over a REAL index built by the REAL reader.
 
 import { describe, expect, it } from "vitest";
-import { buildReconPrompt, RECON_PROMPT_MAX_CHARS } from "../src/engine/forge/brownfield/prompt.js";
+import { buildReconTurnPrompt } from "../src/engine/forge/brownfield/explorationPrompt.js";
+import { RECON_PROMPT_MAX_CHARS } from "../src/engine/forge/brownfield/prompt.js";
+import type { ReconIndex } from "../src/engine/forge/brownfield/types.js";
 import {
   REPO_URL,
   TreeServingGitHubClient,
@@ -85,11 +90,16 @@ function pathEnumerationBytes(files: readonly { path: string; size: number }[]):
   return files.map((file) => `### ${file.path} (${file.size} bytes)\n`).join("\n").length;
 }
 
-describe("buildReconPrompt · shape on a large repository", () => {
+/** Turn zero: the entry point, before the model has asked for anything. */
+function entryPrompt(index: ReconIndex): string {
+  return buildReconTurnPrompt({ index, observations: [], notes: "", finalize: false });
+}
+
+describe("buildReconTurnPrompt · shape on a large repository", () => {
   it("summarizes the tree instead of enumerating it, and stays inside the prompt bound", async () => {
     const http = new TreeServingGitHubClient(LARGE_TREE);
     const index = await readerOver(http).index(REPO_URL);
-    const prompt = buildReconPrompt(index);
+    const prompt = entryPrompt(index);
 
     // Sanity: this really is a large tree, and enumerating it really is huge —
     // nothing below can pass by the fixture being small.
@@ -159,13 +169,13 @@ describe("buildReconPrompt · shape on a large repository", () => {
 
     // The regression: the renderer used to slice each preview to 1200 chars,
     // discarding 71% of every fetched file.
-    const prompt = buildReconPrompt(index);
+    const prompt = entryPrompt(index);
     expect(prompt).toContain(preview);
     expect(prompt).toContain(previewOf(index.files, "README.md"));
   });
 
   it("still reads sensibly on an empty index", () => {
-    const prompt = buildReconPrompt({ repoUrl: REPO_URL, filesIndexed: 0, files: [] });
+    const prompt = entryPrompt({ repoUrl: REPO_URL, filesIndexed: 0, files: [] });
 
     expect(prompt).toContain(REPO_URL);
     expect(prompt).toContain("(no files indexed)");

@@ -206,16 +206,26 @@ describe("Forge provider wrappers (dual-mode structured answerers)", () => {
   it("recon / interview / conversation wrappers are real provider answerers", async () => {
     const recon = wrapProviderReconAnswerer(
       fakeAdapter({
-        identity: { slug: "x", purpose: "y", inferredFrom: "readme" },
-        personas: [],
-        behaviors: [],
-        architecture: [],
-        risks: [],
-        gaps: [],
+        status: "report",
+        notes: "",
+        requests: [],
+        report: {
+          identity: { slug: "x", purpose: "y", inferredFrom: "readme" },
+          personas: [],
+          behaviors: [],
+          architecture: [],
+          risks: [],
+          gaps: [],
+        },
       }),
     );
-    const report = await recon.read({ repoUrl: "https://example/x", filesIndexed: 0, files: [] });
-    expect(report.identity.slug).toBe("x");
+    const turn = await recon.turn({
+      index: { repoUrl: "https://example/x", filesIndexed: 0, files: [] },
+      observations: [],
+      notes: "",
+      finalize: false,
+    });
+    expect(turn.report?.identity.slug).toBe("x");
 
     const interview = wrapProviderInterviewAnswerer(
       fakeAdapter({ say: "what are we building?", captureDelta: {}, suggestions: [], complete: false }),

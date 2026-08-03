@@ -5,8 +5,17 @@
 
 export * from "./types.js";
 export { wrapProviderReconAnswerer, type WrapProviderReconAnswererOptions } from "./providerReconAnswerer.js";
-export { buildReconPrompt, RECON_PROMPT_MAX_CHARS } from "./prompt.js";
+export { renderReconEvidence, RECON_PROMPT_MAX_CHARS } from "./prompt.js";
+export { buildReconTurnPrompt } from "./explorationPrompt.js";
 export { GithubRepoReader, ReconTreeTruncatedError, type GithubRepoReaderInput } from "./githubRepoReader.js";
+export {
+  exploreUntilConverged,
+  ReconExplorationStalledError,
+  type ExploreReconInput,
+  type ExploreReconResult,
+  type ReconExplorationTrace,
+  type ReconExplorationTurn,
+} from "./reconExploration.js";
 export { runRecon, type ReconEngineDeps, type RunReconResult } from "./recon.js";
 export {
   proposeConfigFiles,
