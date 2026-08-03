@@ -21,6 +21,7 @@ import type { ActorContext } from "../src/auth/schemas.js";
 import { InMemorySecretStore } from "../src/engine/contracts/secretStore.js";
 import {
   FetchConfigInjectionGitHub,
+  mergeFileContent,
   openConfigInjectionPr,
   proposeConfigFiles,
   type ReconIndex,
@@ -242,6 +243,60 @@ describe("F-1 · config-injection never destroys a file the repository already o
     }
     expect(http.read(".gitignore")).toContain(".tanren/cache/");
     expect(http.read("justfile")).toContain(STUB_MARKER);
+  });
+});
+
+// `mergeFileContent` is the pure decision BOTH data-loss defects above turn on, and its
+// own docstring says "tests call it directly" — but nothing did. Reached only through the
+// adapter, its edge cases are unreachable: the adapter never presents an existing file
+// with no trailing newline, nor an addition already fully present. Those are exactly the
+// cases where a wrong answer is silent byte corruption rather than a visible clobber.
+describe("mergeFileContent — the pure merge decision, directly", () => {
+  // "the repository has no file at this path" is a VALUE under test here, not an omitted
+  // argument — named so `unicorn/no-useless-undefined` does not read it as the latter.
+  const ABSENT: string | undefined = undefined;
+
+  it("`replace` overwrites, and an ABSENT file always takes the proposal verbatim", () => {
+    expect(mergeFileContent({ content: "new", merge: "replace" }, "old")).toBe("new");
+    for (const merge of ["replace", "append_if_absent", "skip_if_present"] as const) {
+      expect(mergeFileContent({ content: "new", merge }, ABSENT)).toBe("new");
+    }
+  });
+
+  it("`skip_if_present` writes NOTHING when the repo owns the path (CODEOWNERS, justfile)", () => {
+    // `undefined` means "write nothing" — distinct from `""`, which would TRUNCATE the
+    // repository's file. The write seam branches on exactly this.
+    expect(mergeFileContent({ content: "stub", merge: "skip_if_present" }, "theirs")).toBeUndefined();
+    expect(mergeFileContent({ content: "stub", merge: "skip_if_present" }, "")).toBeUndefined();
+  });
+
+  it("`append_if_absent` keeps every existing byte and adds only the missing lines", () => {
+    const merged = mergeFileContent(
+      { content: "node_modules/\n.tanren/cache/\n", merge: "append_if_absent" },
+      "dist/\nnode_modules/\n",
+    );
+    expect(merged).toContain("dist/");
+    expect(merged).toContain("node_modules/");
+    expect(merged).toContain(".tanren/cache/");
+    // The already-present rule is added ONCE, not duplicated.
+    expect(merged?.split("\n").filter((l) => l.trim() === "node_modules/")).toHaveLength(1);
+  });
+
+  it("`append_if_absent` writes NOTHING when the addition is already fully present (trim-insensitive)", () => {
+    // Indentation / CRLF noise must not re-append a rule the repo already has, or every
+    // onboarding run would grow the file by a duplicate block.
+    expect(
+      mergeFileContent({ content: "  .tanren/cache/  \n\n", merge: "append_if_absent" }, ".tanren/cache/\n"),
+    ).toBeUndefined();
+  });
+
+  it("`append_if_absent` never JOINS its addition onto an unterminated last line", () => {
+    // A repo whose .gitignore lacks a trailing newline is common. Concatenating would
+    // silently produce `dist/.tanren/cache/` — one corrupt rule, and the real `dist/`
+    // rule gone. Byte-exact, because "contains both strings" would pass on the bug.
+    expect(mergeFileContent({ content: ".tanren/cache/\n", merge: "append_if_absent" }, "dist/")).toBe(
+      "dist/\n\n.tanren/cache/\n",
+    );
   });
 });
 
