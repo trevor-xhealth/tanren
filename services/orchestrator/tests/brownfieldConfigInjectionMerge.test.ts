@@ -401,14 +401,20 @@ async function buildFullTrackHarness(committed: string[], repoPaths: string[]): 
           return { status: 404, body: undefined };
         },
       },
+      // Recon is SCAFFOLDING for these tests: it reports on its first turn so the
+      // route reaches config-injection, which is what F-1/F-2 actually assert.
+      // Shape mirrors `fakeExplorer`/the answerer fake in brownfieldOnboarding.test.ts.
       reconAnswererFactory: () => ({
-        async read() {
-          return SAMPLE_REPORT;
+        async turn() {
+          return { status: "report", notes: "", requests: [], report: SAMPLE_REPORT };
         },
       }),
       repoReaderFor: () => ({
         async index() {
           return index;
+        },
+        async explore(_repoUrl, request) {
+          return { request, outcome: "not_found", body: "", total: 0, covered: 0 };
         },
       }),
       configInjectionGithubFor: () => ({
