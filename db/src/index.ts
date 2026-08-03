@@ -36,6 +36,9 @@ export {
   RunnerSweptPayload,
 } from "./allocatorEventStore.js";
 export type { AllocatorEventInput, AllocatorEventName, AllocatorEventPayload } from "./allocatorEventStore.js";
+// The event vocabulary AS A TYPE, so any package that declares event names of
+// its own can constrain them to the names a migration inserts.
+export type { EventTypeSeedName } from "./eventTypesSeed.js";
 export * as schema from "./schema.js";
 export { stateEnumLists } from "./stateEnums.js";
 export type { StateEnumName } from "./stateEnums.js";

@@ -67,6 +67,13 @@ function renderSeedTs(rows) {
     "/** @public */",
     "export type EventTypeSeedRow = (typeof eventTypesSeed)[number];",
     "",
+    // The vocabulary as a TYPE. Any module that declares event names of its own
+    // (the allocator registry, and anything like it added later) constrains its
+    // keys to this union, so a name the `event_types` seed does not carry is a
+    // compile error instead of a runtime foreign-key failure on first emit.
+    "/** @public */",
+    'export type EventTypeSeedName = EventTypeSeedRow["name"];',
+    "",
   );
   return lines.join("\n");
 }

@@ -2,51 +2,28 @@
 // allocator-owned payloads and preserves the event notification fanout.
 
 import type pg from "pg";
-import { notifyEventAppended, notifyRunActivity, runWithOrgScope } from "@tanren/db";
-import { z } from "zod";
+import {
+  AllocatorEventRegistry,
+  type AllocatorEventInput,
+  type AllocatorEventName,
+  notifyEventAppended,
+  notifyRunActivity,
+  runWithOrgScope,
+} from "@tanren/db";
 import type { AllocationAudit, SweptAudit } from "./runnerLifecycle.js";
 
 type EventClient = Pick<pg.PoolClient, "query">;
 
-const SshTargetSummary = z
-  .object({
-    host: z.string(),
-    port: z.number().int(),
-    username: z.string(),
-    hostKeyFingerprint: z.string(),
-  })
-  .strict();
-
-const allocatorEventRegistry = {
-  "allocator.allocated": z
-    .object({
-      runnerId: z.string(),
-      imageSha: z.string(),
-      target: SshTargetSummary,
-    })
-    .strict(),
-  "runner.swept": z
-    .object({
-      runnerId: z.string(),
-      runId: z.string().nullable(),
-      reason: z.enum(["terminal_run", "lease_lapsed", "unclaimed_grace"]),
-    })
-    .strict(),
-} as const;
-
-type AllocatorEventName = keyof typeof allocatorEventRegistry;
-type AllocatorEventInput<N extends AllocatorEventName> = {
-  runId: string | null;
-  projectId: string | null;
-  /** Explicit tenant key; never inferred from a project row or ambient scope. */
-  orgId: string;
-  eventType: N;
-  payload: z.output<(typeof allocatorEventRegistry)[N]>;
-};
-
 /**
  * The allocator's typed append API. It is the only allocator-side SQL writer
  * for `events`, and callers must supply the tenant key that is stamped on row.
+ *
+ * The event NAMES and payload schemas come from `AllocatorEventRegistry` in
+ * `@tanren/db`, which binds its keys to the shared event vocabulary. This file
+ * deliberately keeps its own INSERT — the allocator is a de-privileged service
+ * on the other side of the plane split and does not share the orchestrator's
+ * in-process event store — but it no longer declares a parallel vocabulary that
+ * nothing ties to the `event_types` rows the migrations insert.
  */
 async function appendAllocatorEvent<N extends AllocatorEventName>(
   client: EventClient,
@@ -55,7 +32,7 @@ async function appendAllocatorEvent<N extends AllocatorEventName>(
   if (input.orgId.trim() === "") {
     throw new Error("appendAllocatorEvent: explicit orgId must be non-empty");
   }
-  const payload: unknown = allocatorEventRegistry[input.eventType].parse(input.payload);
+  const payload: unknown = AllocatorEventRegistry[input.eventType].parse(input.payload);
   const inserted = await client.query<{ id: string }>(
     `INSERT INTO events (run_id, project_id, org_id, event_type, payload)
      VALUES ($1, $2, $3, $4, $5::jsonb)
@@ -76,7 +53,8 @@ async function appendAllocatorEvent<N extends AllocatorEventName>(
  * Append the durable `allocator.allocated` audit event for a successful allocation,
  * org-scoped (same RLS scope as the `runners` row). `run_id` is NULL for a runless
  * Forge allocation (no `runs` row to reference); the events table allows it. The
- * event type is in the events_event_type_check vocabulary — no migration.
+ * event type is a key of `AllocatorEventRegistry`, so it is in the shared
+ * vocabulary by construction and a migration has inserted its `event_types` row.
  */
 export async function recordAllocatedEvent(appPool: pg.Pool, audit: AllocationAudit): Promise<void> {
   await runWithOrgScope(appPool, audit.orgId, async (client) => {
@@ -100,7 +78,8 @@ export async function recordAllocatedEvent(appPool: pg.Pool, audit: AllocationAu
  * stuck-state `reason` plus the NON-SECRET runner/run handles — the proof a leaked
  * runner the normal release path missed was reconciled LOUDLY, never silently.
  * `run_id` is NULL for a wedged (unclaimed-grace) allocation never tied to a `runs`
- * row. The event type is in the `events_event_type_check` vocabulary (migration 0029).
+ * row. The event type is a key of `AllocatorEventRegistry`, so it is in the shared
+ * vocabulary by construction and a migration has inserted its `event_types` row.
  */
 export async function recordSweptEvent(appPool: pg.Pool, audit: SweptAudit): Promise<void> {
   await runWithOrgScope(appPool, audit.orgId, async (client) => {

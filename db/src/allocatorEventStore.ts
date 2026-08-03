@@ -2,9 +2,14 @@
 // cannot use the orchestrator's in-process PgEventStore. This package owns the
 // two allocator event schemas and the durable insert + notify behavior they
 // share with the orchestrator event store.
+//
+// `AllocatorEventRegistry` here is the SOLE allocator event-name declaration:
+// services/allocator/src/pgAllocatorEvents.ts imports it rather than declaring
+// a parallel one, so there is exactly one allocator surface to bind.
 
 import type pg from "pg";
 import { z } from "zod";
+import type { EventTypeSeedName } from "./eventTypesSeed.js";
 import { notifyEventAppended, notifyRunActivity } from "./notify.js";
 
 type EventClient = Pick<pg.PoolClient, "query">;
@@ -34,10 +39,24 @@ export const RunnerSweptPayload = z
   })
   .strict();
 
+/**
+ * The allocator's event names, BOUND to the shared vocabulary.
+ *
+ * `EventTypeSeedName` is the union of every name in `eventTypesSeed`, which
+ * `check:event-drift` proves is the mirror of `eventTypeVocabulary()` and which
+ * the event-type migration guard proves every migration inserts. Constraining
+ * the keys to that union means a name outside it is a TYPE ERROR here rather
+ * than a `events.event_type` foreign-key failure on the first emit — which
+ * returns 500 from `/internal/append-event` and halts the run.
+ *
+ * `Partial<...>` because the allocator owns two of the vocabulary's names, not
+ * all of them; excess-property checking on the object literal is what rejects a
+ * key the vocabulary does not carry.
+ */
 export const AllocatorEventRegistry = {
   "allocator.allocated": AllocatorAllocatedPayload,
   "runner.swept": RunnerSweptPayload,
-} as const;
+} as const satisfies Partial<Record<EventTypeSeedName, z.ZodType>>;
 
 export type AllocatorEventName = keyof typeof AllocatorEventRegistry;
 export type AllocatorEventPayload<N extends AllocatorEventName> = z.output<(typeof AllocatorEventRegistry)[N]>;

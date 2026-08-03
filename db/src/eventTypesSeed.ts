@@ -368,3 +368,6 @@ export const eventTypesSeed = [
 
 /** @public */
 export type EventTypeSeedRow = (typeof eventTypesSeed)[number];
+
+/** @public */
+export type EventTypeSeedName = EventTypeSeedRow["name"];
