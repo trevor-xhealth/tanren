@@ -316,7 +316,10 @@ describe("routing & limits settings", () => {
     });
     expect(res.status).toBe(302);
     expect((patchCalls[0].body as { config: { credentials: unknown } }).config.credentials).toEqual({
-      defaultLlm: { cli: "codex", model: "default", authRef: "credential/codex/org/o/c" },
+      // NO `model`: binding a credential selects the CREDENTIAL, not a model. An
+      // absent model is the routing schema's "use this provider's pinned default";
+      // the old `model: "default"` sentinel 400'd at the provider.
+      defaultLlm: { cli: "codex", authRef: "credential/codex/org/o/c" },
       githubCredentialRef: "credential/github/org/o/g",
     });
   });

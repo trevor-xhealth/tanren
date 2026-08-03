@@ -227,10 +227,13 @@ export type RoleId = "plan" | "write" | "check" | "audit" | "demo" | "forge";
 export const ROLE_IDS: RoleId[] = ["plan", "write", "check", "audit", "demo", "forge"];
 export type HealthHint = "ok" | "warn" | "rate_limited" | "fail";
 
-/** One fallback step in a role's routing chain. */
+/** One fallback step in a role's routing chain. Mirrors the orchestrator
+ * `RoutingChainEntry`: `model` is OPTIONAL and its ABSENCE means "use this
+ * provider's pinned default" (each adapter substitutes its own pin). Never send
+ * a placeholder string for it. */
 export interface RoutingChainEntry {
   cli: string;
-  model: string;
+  model?: string;
   authRef: string;
   healthHint?: HealthHint;
 }
@@ -256,7 +259,7 @@ export interface ProjectConfig {
   /** Project-bound credentials; org default fills any omitted kind. `defaultLlm` is
    * the provider-agnostic default routing entry {cli,model,authRef}. */
   credentials?: {
-    defaultLlm?: { cli: string; model: string; authRef: string };
+    defaultLlm?: { cli: string; model?: string; authRef: string };
     githubCredentialRef?: string;
   };
   [key: string]: unknown;

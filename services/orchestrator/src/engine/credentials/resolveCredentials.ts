@@ -296,9 +296,28 @@ function resolveLlmCredentials(
 ): ResolvedLlmCredentials {
   const providerMode: ProviderMode = projectConfig.providerMode ?? orgConfig.providerMode;
   if (providerMode === "managed") {
+    // MANAGED mode resolves the PLATFORM shell, deliberately without reading the
+    // tenant's `defaultCredentials.defaultLlm`: the platform credential ref +
+    // endpoint are DEPLOY/hosting config, not userland. That is not an accident of
+    // this branch — `OrgConfigV1` is `.strict()` and has NO managed-provider block
+    // at all, so an org row CANNOT express a managed credential/endpoint override
+    // (see `managedProvider.ts`, and the org-config test that asserts a userland
+    // `managedProvider` block is REJECTED). A tenant chooses the MODE; the hosting
+    // layer owns the shell.
+    //
+    // The MODEL is omitted for the same reason it must not be borrowed from the
+    // tenant entry: `defaultLlm` is an atomic (cli, model, authRef) triple whose
+    // cli↔authRef compatibility `DefaultLlmEntry` validates as a unit, and a
+    // tenant's model id is namespaced for THEIR route (codex-direct
+    // `gpt-5.6-luna`) — replaying it on the platform's OpenRouter route (which
+    // needs `openai/gpt-5.6-luna`) would be a silent namespace mis-wire. An
+    // ABSENT model is the schema's NAMED "use the provider's pinned default", and
+    // the codex OpenRouter path substitutes `CODEX_OPENROUTER_MODEL` for it. It is
+    // never the `"default"` string — that sentinel reached OpenRouter verbatim and
+    // 400'd every managed model call.
     const managed = defaultManagedProviderConfig();
     return {
-      defaultLlm: { cli: "codex", model: "default", authRef: managed.credentialRef },
+      defaultLlm: { cli: "codex", authRef: managed.credentialRef },
       providerMode,
       endpointOverride: resolveHarnessEndpointOverride("managed", managed),
     };

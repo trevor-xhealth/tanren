@@ -355,13 +355,17 @@ function mountRoutingSettingsScreens(app: Hono, deps: ShellDeps): void {
     const form = await c.req.parseBody();
     const orgId = formField(form, "orgId");
     const role = formField(form, "role") as RoleId;
+    // A BLANK model field is the operator saying "use this provider's pinned
+    // default" — the entry is stored with NO `model` key (the routing schema's
+    // named representation of that), never with a placeholder string.
+    const model = formField(form, "model").trim();
     const entry: RoutingChainEntry = {
       cli: formField(form, "cli").trim(),
-      model: formField(form, "model").trim(),
+      ...(model !== "" && { model }),
       authRef: formField(form, "authRef").trim(),
     };
     await mutateConfig(c, deps, orgId, projectId, (config) => {
-      if (ROLE_IDS.includes(role) && entry.cli !== "" && entry.model !== "" && entry.authRef !== "") {
+      if (ROLE_IDS.includes(role) && entry.cli !== "" && entry.authRef !== "") {
         config.routing[role].chain.push(entry);
       }
     });
@@ -414,11 +418,14 @@ function mountRoutingSettingsScreens(app: Hono, deps: ShellDeps): void {
     const githubCredentialRef = formField(form, "githubCredentialRef").trim();
     await mutateConfig(c, deps, orgId, projectId, (config) => {
       const credentials: {
-        defaultLlm?: { cli: string; model: string; authRef: string };
+        defaultLlm?: { cli: string; model?: string; authRef: string };
         githubCredentialRef?: string;
       } = {};
-      if (codexCredentialRef !== "")
-        credentials.defaultLlm = { cli: "codex", model: "default", authRef: codexCredentialRef };
+      // Binding a credential selects the CREDENTIAL, not a model: the entry omits
+      // `model`, which the routing schema reads as "use this provider's pinned
+      // default". It must NOT be the literal "default" — that sentinel reached the
+      // provider verbatim and 400'd the run.
+      if (codexCredentialRef !== "") credentials.defaultLlm = { cli: "codex", authRef: codexCredentialRef };
       if (githubCredentialRef !== "") credentials.githubCredentialRef = githubCredentialRef;
       if (Object.keys(credentials).length === 0) {
         delete config.credentials;

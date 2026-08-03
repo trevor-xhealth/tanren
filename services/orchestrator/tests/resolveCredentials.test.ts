@@ -294,8 +294,13 @@ describe("resolveCredentialsForRun", () => {
       const projectConfig = migrateProjectConfig({ version: 1 });
       const resolved = await resolveCredentialsForRun(pool, { projectConfig, orgScope: orgScope("org_1") });
       expect(resolved.providerMode).toBe("managed");
-      // The tenant's own default LLM is NOT used — the platform ref is.
-      expect(resolved.defaultLlm).toEqual(codexEntry(platformRef));
+      // The tenant's own default LLM is NOT used — the platform ref is. The entry
+      // carries NO `model`: the platform shell is deploy config, and an ABSENT
+      // model is the routing schema's "use the provider's pinned default" (the
+      // codex OpenRouter path substitutes CODEX_OPENROUTER_MODEL). It is NOT the
+      // `"default"` sentinel, which reached OpenRouter verbatim and 400'd.
+      expect(resolved.defaultLlm).toEqual({ cli: "codex", authRef: platformRef });
+      expect(resolved.defaultLlm.model).toBeUndefined();
       expect(resolved.defaultLlm.authRef).not.toBe(codexOrgRef);
       // GitHub stays the tenant's own credential.
       expect(resolved.githubCredentialRef).toBe(githubOrgRef);

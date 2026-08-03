@@ -214,7 +214,14 @@ export function createAiProviderRoutes(options: AiProviderRoutesOptions) {
       if (exists === undefined) {
         return c.json({ error: "org_not_found" }, 404);
       }
-      const defaultLlm: RoutingChainEntry = { cli: defaultCli, model: "default", authRef: ref };
+      // No `model`: connecting a provider selects the CREDENTIAL, not a model.
+      // An ABSENT model is the routing schema's NAMED "use this provider's pinned
+      // default", which each adapter substitutes at run time. It must NOT be the
+      // literal `"default"` — that is a sentinel no resolver understands, and it
+      // used to pass through verbatim into the generated codex `config.toml` and
+      // 400 at the provider. An operator who wants a specific model sets it on the
+      // routing entry explicitly.
+      const defaultLlm: RoutingChainEntry = { cli: defaultCli, authRef: ref };
       // Progress-based mutate: re-merge after a lost race so concurrent org-config
       // field writes are not clobbered by a precomputed full-document overwrite.
       await mutateOrgConfigFor(options.pool, orgId, (raw) => {

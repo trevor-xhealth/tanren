@@ -15,10 +15,26 @@ export type HealthHint = z.infer<typeof HealthHint>;
 
 // A single fallback step. The schema is stable across providers — Codex,
 // Claude, opencode, and other CLIs all populate it with no shape change.
+//
+// `model` is OPTIONAL, and its ABSENCE is the NAMED way to say "use this
+// provider's pinned default model". Every adapter already takes `model?: string`
+// and resolves an absent value to its own pin (`resolveCodexOpenRouterModel` /
+// `resolveCodexDirectModel` / `resolveOpencodeModel` / claude's `modelFlag` /
+// aider's + pi's `DEFAULT_*_MODEL`), so absence is the shape the whole downstream
+// was already built for. Making the field required forced every write site that
+// had no model to choose to invent one, and the value invented was the literal
+// string `"default"` — a SENTINEL no resolver understands. Because `"default"` is
+// non-nullish it flowed straight through the pin substitution into the generated
+// codex `config.toml` and reached OpenRouter, which answered
+// `400 "default is not a valid model ID"` and killed every managed-mode model
+// call. The concept "the provider's pin" now has a representation in the schema,
+// so no write site ever needs a magic string again. A PRESENT value is still an
+// explicit, non-empty pin that resolution passes through verbatim and never
+// overwrites.
 export const RoutingChainEntry = z
   .object({
     cli: z.string().min(1),
-    model: z.string().min(1),
+    model: z.string().min(1).optional(),
     authRef: z.string().min(1),
     healthHint: HealthHint.optional(),
   })

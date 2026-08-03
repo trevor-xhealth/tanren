@@ -78,7 +78,7 @@ export interface SettingsBodyProps {
   orgCredentials?: CredentialRecord[];
   /** The project's currently-bound credentials (default LLM entry + github ref). */
   boundCredentials?: {
-    defaultLlm?: { cli: string; model: string; authRef: string };
+    defaultLlm?: { cli: string; model?: string; authRef: string };
     githubCredentialRef?: string;
   };
   /** Session CSRF for pure HTML form posts (cookie-authenticated writes). */
@@ -150,7 +150,7 @@ function RoutingPanel(props: SettingsBodyProps) {
 
 function RoleRow(props: {
   role: RoleId;
-  chain: { cli: string; model: string; authRef: string; healthHint?: string }[];
+  chain: { cli: string; model?: string; authRef: string; healthHint?: string }[];
   orgId: string;
   projectId: string;
   csrfToken?: string;
@@ -169,7 +169,9 @@ function RoleRow(props: {
           <div class={`routing-row${index === 0 ? " first" : ""}`}>
             <span class="rank">{index === 0 ? "preferred" : `↓ ${index + 1}`}</span>
             <span class="cli">{entry.cli}</span>
-            <span class="model">{entry.model}</span>
+            {/* An absent model is the routing schema's "use this provider's pinned
+                default" — rendered as such, never as a placeholder model id. */}
+            <span class="model">{entry.model ?? "provider default"}</span>
             <span class="auth">{entry.authRef}</span>
             <span class={`health ${entry.healthHint ?? "ok"}`}>
               {entry.healthHint === "rate_limited" ? "rate-limited" : (entry.healthHint ?? "ok")}
@@ -217,7 +219,9 @@ function RoleRow(props: {
         <input type="hidden" name="orgId" value={props.orgId} />
         <input type="hidden" name="role" value={props.role} />
         <input type="text" name="cli" placeholder="cli (e.g. codex)" required />
-        <input type="text" name="model" placeholder="model (e.g. gpt-5.6-luna)" required />
+        {/* NOT `required`: leaving the model blank stores an entry with no `model`,
+            which the routing schema reads as "use this provider's pinned default". */}
+        <input type="text" name="model" placeholder="model (blank = provider default)" />
         <input type="text" name="authRef" placeholder="auth ref (vault://…)" required />
         <button type="submit">+ add fallback</button>
       </form>

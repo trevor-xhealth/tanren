@@ -49,7 +49,10 @@ function routingLines(routing: RoutingTable): string[] {
   for (const role of RoleId.options) {
     const chain = routing[role].chain;
     if (chain.length === 0) continue;
-    const rendered = chain.map((e) => `${e.cli}/${e.model}`);
+    // An entry with NO `model` is the routing schema's "use this provider's pinned
+    // default" — render the bare cli rather than interpolating `undefined` into the
+    // committed `tanren.yaml`.
+    const rendered = chain.map((e) => (e.model === undefined ? e.cli : `${e.cli}/${e.model}`));
     lines.push(`  ${role}.primary = "${rendered[0]}"`);
     if (rendered.length > 1) {
       lines.push(

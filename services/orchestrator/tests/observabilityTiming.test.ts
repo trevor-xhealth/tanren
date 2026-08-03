@@ -240,4 +240,46 @@ describe("provider adapter timing wrappers", () => {
       attributes: { cli: "claude", role: "checker" },
     });
   });
+
+  // The timing decorator is the instance `buildWriterAdapter`/`buildAnswererAdapter`
+  // hand the loop, so it is the object the cost recorder reads `model` off
+  // (`args.adapter.model ?? ""` → `cost_records.model`). Dropping the field here
+  // blanked the recorded model for EVERY production call — and a blank model makes
+  // the notional price lookup unresolvable. An adapter that declares NO model (a
+  // fake fixture) must stay absent, never become a `undefined`-valued key.
+  it("forwards the wrapped adapter's real model id (the cost_records.model value)", async () => {
+    const { sink } = captureSink();
+    const writerResult: WriterResult = { diff: "d", commits: [], exitReason: "completed", tokenUsage: emptyTokenUsage };
+    const writer = timedWriterAdapter(
+      {
+        kind: "writer",
+        cli: "codex",
+        authRef: "credential/openrouter/platform/default",
+        model: "openai/gpt-5.6-luna",
+        runWriter: async () => writerResult,
+      },
+      sink,
+    );
+    expect(writer.model).toBe("openai/gpt-5.6-luna");
+
+    const answerer = timedAnswererAdapter<{ ok: boolean }>(
+      {
+        kind: "answerer",
+        cli: "codex",
+        authRef: "credential/openrouter/platform/default",
+        model: "openai/gpt-5.6-luna",
+        runAnswerer: async () => ({ ok: true }),
+      },
+      "auditor",
+      sink,
+    );
+    expect(answerer.model).toBe("openai/gpt-5.6-luna");
+
+    const withoutModel = timedWriterAdapter(
+      { kind: "writer", cli: "fake", authRef: "credential/fake", runWriter: async () => writerResult },
+      sink,
+    );
+    expect(withoutModel.model).toBeUndefined();
+    expect(Object.hasOwn(withoutModel, "model")).toBe(false);
+  });
 });

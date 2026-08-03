@@ -128,14 +128,18 @@ describe("ai-provider routes", () => {
     // The default cli is PROVIDER-SLUG-aware: openrouter → codex (config.toml env).
     const config = pool.orgs.get("org_acme")?.config as {
       providerMode: string;
-      defaultCredentials?: { defaultLlm?: { cli: string; model: string; authRef: string } };
+      defaultCredentials?: { defaultLlm?: { cli: string; model?: string; authRef: string } };
     };
     expect(config.providerMode).toBe("byok");
+    // NO `model` key: connecting a provider selects the CREDENTIAL, not a model,
+    // and an ABSENT model is the routing schema's "use this provider's pinned
+    // default". The old `model: "default"` sentinel reached the provider verbatim
+    // and 400'd every call made with the wired default.
     expect(config.defaultCredentials?.defaultLlm).toEqual({
       cli: "codex",
-      model: "default",
       authRef: created.body.ref,
     });
+    expect(config.defaultCredentials?.defaultLlm?.model).toBeUndefined();
   });
 
   it("wires an openai api_key default through codex (native OPENAI_API_KEY)", async () => {
@@ -199,14 +203,18 @@ describe("ai-provider routes", () => {
     expect(created.body.isDefault).toBe(true);
     const config = pool.orgs.get("org_acme")?.config as {
       providerMode: string;
-      defaultCredentials?: { defaultLlm?: { cli: string; model: string; authRef: string } };
+      defaultCredentials?: { defaultLlm?: { cli: string; model?: string; authRef: string } };
     };
     expect(config.providerMode).toBe("byok");
+    // NO `model` key: connecting a provider selects the CREDENTIAL, not a model,
+    // and an ABSENT model is the routing schema's "use this provider's pinned
+    // default". The old `model: "default"` sentinel reached the provider verbatim
+    // and 400'd every call made with the wired default.
     expect(config.defaultCredentials?.defaultLlm).toEqual({
       cli: "codex",
-      model: "default",
       authRef: created.body.ref,
     });
+    expect(config.defaultCredentials?.defaultLlm?.model).toBeUndefined();
   });
 
   it("makeDefault:false connects without changing routing/default", async () => {

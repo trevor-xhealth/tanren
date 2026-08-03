@@ -14,6 +14,14 @@ export function timedWriterAdapter(inner: WriterAdapter, sink: TimingSink = cons
     kind: inner.kind,
     cli: inner.cli,
     authRef: inner.authRef,
+    // Forward the wrapped adapter's REAL model id. THIS decorator is the instance
+    // `buildWriterAdapter` hands the loop, so it is the object the cost recorder
+    // reads `model` off (`args.adapter.model ?? ""` → `cost_records.model`).
+    // Dropping it here silently blanked the recorded model for every production
+    // writer call — and a blank model is exactly what makes the notional price
+    // lookup unresolvable. Spread conditionally so an adapter that legitimately
+    // declares none (a fake fixture) stays absent rather than becoming `undefined`.
+    ...(inner.model !== undefined && { model: inner.model }),
     runWriter: (opts) =>
       timed<WriterResult>(
         {
