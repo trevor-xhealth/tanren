@@ -32,6 +32,43 @@ interface TreeEntry {
   size?: unknown;
 }
 
+/**
+ * GitHub truncated the recursive tree listing, so the index would be PARTIAL.
+ *
+ * `GET /git/trees/<ref>?recursive=1` is capped at 100,000 entries / 7 MB. Past
+ * that GitHub returns a prefix of the tree and sets a top-level `truncated:
+ * true` — the only signal there is that anything is missing.
+ *
+ * Recon FAILS here rather than indexing the fragment. Reconnaissance's whole
+ * output is a report that reads as authoritative over a codebase, and its
+ * consumers (the config-injection PR, the DAG seed) act on it; a report built
+ * from an arbitrary alphabetical prefix of a repository is confidently wrong
+ * about everything it never saw, and nothing downstream can tell. Recon is
+ * read-only and nothing has been written when this throws, so failing costs the
+ * operator a retry and buys them the truth. Indexing the prefix and flagging it
+ * would leave the honest signal buried inside a plausible-looking report.
+ *
+ * The real fix for a repository this size is walking subtrees page by page; this
+ * error is what keeps that requirement visible instead of hiding it.
+ */
+export class ReconTreeTruncatedError extends Error {
+  constructor(
+    readonly repo: GitHubRepository,
+    readonly branch: string,
+    readonly entriesReturned: number,
+  ) {
+    super(
+      `recon aborted: GitHub truncated the recursive tree for ${repo.owner}/${repo.name}@${branch}. ` +
+        `It returned ${entriesReturned} entries and set "truncated": true, so the listing is a PARTIAL ` +
+        `prefix of the repository (the trees API caps a recursive listing at 100,000 entries / 7 MB). ` +
+        `Indexing it would produce a reconnaissance report that reads as authoritative over files it ` +
+        `never saw, so recon stops here. Onboard a smaller subtree, or extend the reader to walk ` +
+        `subtrees page by page.`,
+    );
+    this.name = "ReconTreeTruncatedError";
+  }
+}
+
 export interface GithubRepoReaderInput {
   http: GitHubHttpClient;
   resolved: ResolvedGithubToken;
@@ -74,8 +111,15 @@ export class GithubRepoReader implements RepoReader {
     if (response.status !== 200 || typeof response.body !== "object" || response.body === null) {
       return [];
     }
-    const tree = (response.body as Record<string, unknown>)["tree"];
-    return Array.isArray(tree) ? (tree as TreeEntry[]) : [];
+    const body = response.body as Record<string, unknown>;
+    const tree = Array.isArray(body["tree"]) ? (body["tree"] as TreeEntry[]) : [];
+    // The ONLY signal that the listing is short. Checked BEFORE anything is read
+    // from it, so a truncated response never reaches the index (or costs a
+    // content fetch) — see `ReconTreeTruncatedError` for why this fails loud.
+    if (body["truncated"] === true) {
+      throw new ReconTreeTruncatedError(repo, this.deps.defaultBranch, tree.length);
+    }
+    return tree;
   }
 
   private async readPreview(repo: GitHubRepository, path: string): Promise<string> {

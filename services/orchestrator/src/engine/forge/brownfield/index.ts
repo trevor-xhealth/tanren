@@ -6,7 +6,7 @@
 export * from "./types.js";
 export { wrapProviderReconAnswerer, type WrapProviderReconAnswererOptions } from "./providerReconAnswerer.js";
 export { buildReconPrompt, RECON_PROMPT_MAX_CHARS } from "./prompt.js";
-export { GithubRepoReader, type GithubRepoReaderInput } from "./githubRepoReader.js";
+export { GithubRepoReader, ReconTreeTruncatedError, type GithubRepoReaderInput } from "./githubRepoReader.js";
 export { runRecon, type ReconEngineDeps, type RunReconResult } from "./recon.js";
 export {
   proposeConfigFiles,

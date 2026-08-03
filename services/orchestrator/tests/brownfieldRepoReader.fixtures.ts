@@ -20,6 +20,8 @@ export function contentsOf(path: string): string {
 
 /** How a served tree/file departs from the simple default. */
 export interface TreeServingOptions {
+  /** Serve GitHub's `truncated: true` flag alongside a PARTIAL `tree`. */
+  readonly truncated?: boolean;
   /** Pad every served file body out to this many chars (still `contentsOf`-prefixed). */
   readonly padContentsTo?: number;
 }
@@ -40,6 +42,7 @@ export class TreeServingGitHubClient implements GitHubHttpClient {
         status: 200,
         body: {
           tree: this.treePaths.map((path) => ({ path, type: "blob", size: path.length })),
+          truncated: this.options.truncated ?? false,
         },
       };
     }
