@@ -518,48 +518,81 @@ seed-platform-creds env_file="" *refs:
     corepack pnpm exec tsx scripts/dev/seed-platform-creds.ts {{ refs }}
 
 # Preflight for an apex (or any dev-stack) run from this cwd. Verifies the
-# canonical secrets layout is intact, required keys are present in `.env`,
-# `.env.validation.local` exists if any TANREN_*_LIVE / TANREN_E2E_* flag is set
-# in the current shell env, and the BYOK Codex `~/.codex/auth.json` is in place.
-# Returns a clean go/no-go summary — fail-loud on any missing piece so an
-# operator never starts an apex trial that will only halt mid-run for a
-# missing secret. Read-only: doesn't mutate anything.
+# secrets layout is intact for the DECLARED `TANREN_SECRETS_MODE`, required keys
+# are present in `.env`, `.env.validation.local` exists if any TANREN_*_LIVE /
+# TANREN_E2E_* flag is set in the current shell env, and the BYOK Codex
+# `~/.codex/auth.json` is in place. Returns a clean go/no-go summary — fail-loud
+# on any missing piece so an operator never starts an apex trial that will only
+# halt mid-run for a missing secret. Read-only: doesn't mutate anything.
+#
+# MODE-AWARE, matching `secrets-link`. Under the default `canonical` mode the
+# canonical dir + its perms + its `.env` are the contract. Under the explicitly
+# declared `dev-defaults` mode (CI, smoke) there IS no canonical dir — `.env` is a
+# symlink to the checked-in `.env.example` — so demanding one made `doctor` fail on
+# a correctly-provisioned CI checkout that `secrets-link` had just satisfied.
 doctor:
   #!/usr/bin/env bash
   set -euo pipefail
+  mode="${TANREN_SECRETS_MODE:-canonical}"
   src="${TANREN_SECRETS_DIR:-$HOME/.config/tanren/secrets}"
   fail=0
   ok()  { echo "  ok   $1"; }
   bad() { echo "  FAIL $1" >&2; fail=1; }
-  echo "doctor: canonical secrets dir = $src"
-  if [ ! -d "$src" ]; then
-    bad "secrets dir does not exist: $src (run 'just secrets-migrate' or create it)"
-  else
-    ok "secrets dir exists"
-    perm="$(stat -c '%a' "$src")"
-    if [ "$perm" != "700" ]; then
-      bad "secrets dir perms are $perm; should be 700 (chmod 700 $src)"
+  # Octal file mode, portably. GNU coreutils uses `stat -c '%a'`; BSD/macOS uses
+  # `stat -f '%Lp'`. The recipe previously hardcoded the GNU form, so every perms
+  # check aborted on macOS under `set -e` before any later check could run.
+  filemode() { stat -c '%a' "$1" 2>/dev/null || stat -f '%Lp' "$1"; }
+  case "$mode" in
+    canonical|dev-defaults) ;;
+    *) echo "doctor: invalid TANREN_SECRETS_MODE=$mode (valid: canonical, dev-defaults)" >&2; exit 1 ;;
+  esac
+  echo "doctor: secrets mode = $mode"
+  if [ "$mode" = "canonical" ]; then
+    echo "doctor: canonical secrets dir = $src"
+    if [ ! -d "$src" ]; then
+      bad "secrets dir does not exist: $src (run 'just secrets-migrate' or create it)"
     else
-      ok "secrets dir perms 700"
+      ok "secrets dir exists"
+      perm="$(filemode "$src")"
+      if [ "$perm" != "700" ]; then
+        bad "secrets dir perms are $perm; should be 700 (chmod 700 $src)"
+      else
+        ok "secrets dir perms 700"
+      fi
+    fi
+    if [ ! -f "$src/.env" ]; then
+      bad ".env missing at $src/.env"
+    else
+      ok ".env present"
+      perm="$(filemode "$src/.env")"
+      if [ "$perm" != "600" ]; then
+        bad ".env perms are $perm; should be 600 (chmod 600 $src/.env)"
+      else
+        ok ".env perms 600"
+      fi
+    fi
+  else
+    # dev-defaults: `.env.example` is the checked-in source `secrets-link` points
+    # `./.env` at. It is a REPO file, not a secret, so no 600/700 perms apply.
+    if [ ! -f "./.env.example" ]; then
+      bad "mode=dev-defaults but ./.env.example is absent (this mode requires the checked-in template)"
+    else
+      ok ".env.example present (dev-defaults source)"
     fi
   fi
-  if [ ! -f "$src/.env" ]; then
-    bad ".env missing at $src/.env"
+  # The resolved `.env` — whichever mode produced it — must exist and carry the
+  # infra bootstrap keys. Checked through the cwd symlink so this validates what
+  # the stack will actually read.
+  if [ ! -f "./.env" ]; then
+    bad "./.env is not readable — run 'just secrets-link'"
   else
-    ok ".env present"
     for k in DATABASE_URL VAULT_TOKEN TANREN_SECRET_STORE; do
-      if ! grep -qE "^${k}=" "$src/.env"; then
+      if ! grep -qE "^${k}=" "./.env"; then
         bad ".env missing required key: $k"
       else
         ok ".env has $k"
       fi
     done
-    perm="$(stat -c '%a' "$src/.env")"
-    if [ "$perm" != "600" ]; then
-      bad ".env perms are $perm; should be 600 (chmod 600 $src/.env)"
-    else
-      ok ".env perms 600"
-    fi
   fi
   if [ ! -L "./.env" ]; then
     if [ -f "./.env" ]; then
@@ -577,19 +610,22 @@ doctor:
         needs_validation=1; break;;
     esac
   done < <(env | cut -d= -f1)
+  # Both optional files are checked THROUGH the cwd (what the stack actually
+  # reads), not at `$src` — under dev-defaults there is no `$src` at all, and even
+  # under canonical mode the cwd link is the thing that must resolve.
   if [ "$needs_validation" -eq 1 ]; then
-    if [ ! -f "$src/.env.validation.local" ]; then
-      bad ".env.validation.local missing at $src (live/E2E flag set in shell env)"
+    if [ ! -f "./.env.validation.local" ]; then
+      bad ".env.validation.local not readable in cwd (live/E2E flag set in shell env; run 'just secrets-link')"
     else
       ok ".env.validation.local present"
     fi
   else
     echo "  skip .env.validation.local (no TANREN_E2E_* / TANREN_*_LIVE in env)"
   fi
-  if [ -f "$src/connections.manifest.local.yaml" ]; then
+  if [ -f "./connections.manifest.local.yaml" ]; then
     ok "connections.manifest.local.yaml present"
   else
-    echo "  note connections.manifest.local.yaml not in $src (needed for apex §4)"
+    echo "  note connections.manifest.local.yaml not readable in cwd (needed for apex §4)"
   fi
   if [ -f "$HOME/.codex/auth.json" ]; then
     ok "~/.codex/auth.json present (BYOK Codex)"

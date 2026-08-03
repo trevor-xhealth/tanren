@@ -133,8 +133,12 @@ PLAINTEXT LOCAL storage**); every worktree symlinks them in via
 > worktrees see the same set. `just doctor` verifies the layout is intact and
 > `.env` has the required keys; run it before `just up-dev` from a fresh worktree.
 
-**Secrets mode is explicit, never implicit.** `secrets-link` reads
-`TANREN_SECRETS_MODE` (default: `canonical`):
+**Secrets mode is explicit, never implicit.** `secrets-link` **and `doctor`** both
+read `TANREN_SECRETS_MODE` (default: `canonical`) — `doctor` checks the canonical
+dir, its `700`/`600` perms and its `.env` only under `canonical`; under
+`dev-defaults` there is no canonical dir, so it validates the checked-in
+`.env.example` source instead. Either way it reads the required keys through the
+cwd `./.env` the stack will actually load.
 
 | Mode                  | Behavior                                                                      | Used by                                             |
 | --------------------- | ----------------------------------------------------------------------------- | --------------------------------------------------- |
