@@ -64,5 +64,6 @@ export const wave3VocabularySensitivityRules: SensitivityRule[] = [
     "generation",
     "replacementSpecIds",
     "replacementSpecIds[]",
+    "specMode",
   ]),
 ];

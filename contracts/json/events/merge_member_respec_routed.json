@@ -42,6 +42,14 @@
     "sourceSpecId": {
       "minLength": 1,
       "type": "string"
+    },
+    "specMode": {
+      "enum": [
+        "specialize_seed",
+        "from_scratch",
+        "modify_existing"
+      ],
+      "type": "string"
     }
   },
   "required": [
@@ -53,7 +61,8 @@
     "priorAgentRoute",
     "nextAgentRoute",
     "generation",
-    "replacementSpecIds"
+    "replacementSpecIds",
+    "specMode"
   ],
   "type": "object",
   "x-tanren-schema-id": "tanren.event.merge.member.respec_routed"

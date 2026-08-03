@@ -373,6 +373,17 @@ export const MergeMemberRespecRoutedPayload = z
     generation: z.number().int().positive(),
     /** The replacement spec(s) the re-drive materialized (>= 1: the intent survives). */
     replacementSpecIds: z.array(z.string().min(1)).min(1),
+    /**
+     * The AUTHORING MODE (`SpecMode`) the replacement spec carries — inherited from the stuck
+     * parent, because the mode describes the WORKSPACE the writer opens and a re-spec targets
+     * the same project. Present so the mode a re-spec hands its replacement is OBSERVABLE at
+     * the moment it is decided: a re-spec used to silently flip a brownfield spec back to
+     * `from_scratch`, and the first symptom was an enormous scope-violating diff. The literal
+     * set is pinned to `engine/state/spec.ts`'s `SpecMode` (and thus the `specs_mode_check`
+     * CHECK) by `respecInheritsSpecMode.test.ts`, so a widened enum cannot drift past the
+     * event contract in silence — the exact failure mode this whole change is about.
+     */
+    specMode: z.enum(["specialize_seed", "from_scratch", "modify_existing"]),
   })
   .strict()
   .superRefine((p, ctx) => {
