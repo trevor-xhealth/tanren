@@ -226,8 +226,10 @@ describe("inbox issues source boundary — removed providers never reach authori
   });
 
   it.each([
-    ["linear", { provider: "linear", team: "ENG", tokenRef: "credential/linear/old" }],
+    ["bare-token linear", { provider: "linear", teamKey: "ENG", tokenRef: "credential/linear/old" }],
     ["jira", { provider: "jira", baseUrl: "https://jira.example", projectKey: "ENG" }],
+    ["an unimplemented tracker", { provider: "shortcut", projectKey: "ENG" }],
+    ["a non-string provider", { provider: 7, teamKey: "ENG" }],
     ["legacy GitHub discriminator", { provider: "github", owner: "cat-cave", repo: "app" }],
     ["raw tokenRef", { provider: "github", owner: "cat-cave", repo: "app", tokenRef: "credential/old" }],
   ])("rejects %s config at source creation without persisting it", async (_label, config) => {
@@ -235,6 +237,34 @@ describe("inbox issues source boundary — removed providers never reach authori
     const res = await postSource(pool, { kind: "issues", name: "unsupported", config });
     expect(res.status).toBe(400);
     expect((await res.json()) as unknown).toMatchObject({ error: "unsupported_inbox_provider" });
+    expect(sourceInserts).toHaveLength(0);
+  });
+
+  it("creates a Linear issues source and persists its one canonical credential-free config", async () => {
+    const { pool, sourceInserts } = stubPool();
+    const res = await postSource(pool, {
+      kind: "issues",
+      name: "linear · acme eng",
+      projectId: "project_a",
+      config: { provider: "linear", teamKey: "ENG" },
+    });
+    expect(res.status).toBe(201);
+    expect(sourceInserts).toHaveLength(1);
+    // `labels` defaults; nothing else — in particular no credential coordinate,
+    // because the Linear token comes from the org's integration grant.
+    expect(sourceInserts[0]!.config).toEqual({ provider: "linear", teamKey: "ENG", labels: [] });
+  });
+
+  it("rejects a Linear source missing its team key at the route boundary", async () => {
+    const { pool, sourceInserts } = stubPool();
+    const res = await postSource(pool, {
+      kind: "issues",
+      name: "linear",
+      projectId: "project_a",
+      config: { provider: "linear" },
+    });
+    expect(res.status).toBe(400);
+    expect(await res.json()).toMatchObject({ error: "invalid_inbox_source_config" });
     expect(sourceInserts).toHaveLength(0);
   });
 
@@ -300,7 +330,7 @@ describe("inbox issues source boundary — removed providers never reach authori
   });
 
   it.each([
-    ["linear", { provider: "linear", team: "ENG" }],
+    ["a stale bare-token linear", { provider: "linear", team: "ENG", tokenRef: "credential/linear/old" }],
     ["jira", { provider: "jira", baseUrl: "https://jira.example", projectKey: "ENG" }],
     ["raw tokenRef", { provider: "github", owner: "cat-cave", repo: "app", tokenRef: "credential/old" }],
     ["foreign staticRef", { owner: "cat-cave", repo: "app", staticRef: "credential/github/org/org_b/default" }],

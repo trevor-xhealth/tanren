@@ -9,7 +9,7 @@
 
 import { z } from "zod";
 import { SpecPriority } from "../../state/spec.js";
-import { assertNoSourceCredentialOverride } from "./connectorErrors.js";
+import { assertNoSourceCredentialOverride, resolveIssuesProvider } from "./connectorErrors.js";
 
 // The connector kinds — mirror the hi-fi `INBOX_SOURCES` glyph keys. `system`
 // and `scheduled_audit` are the auto-routing system sources.
@@ -46,6 +46,30 @@ export const ActiveGitHubIssuesConfig = z
   .strict();
 export type ActiveGitHubIssuesConfig = z.infer<typeof ActiveGitHubIssuesConfig>;
 
+/**
+ * The sole active persisted shape for a Linear issues source.
+ *
+ * `provider` is REQUIRED and is the discriminator the `issues` kind dispatches on
+ * (see `resolveIssuesProvider`). `teamKey` is the Linear team key — e.g. `ENG` in
+ * `ENG-412` — and doubles as the grant's `resourceId`, so the organization's
+ * integration selection scopes intake to exactly the teams it authorized. There is
+ * NO credential coordinate here: the token is resolved per fetch from the org's
+ * Linear integration grant.
+ */
+export const ActiveLinearIssuesConfig = z
+  .object({
+    provider: z.literal("linear"),
+    teamKey: z.string().trim().min(1),
+    labels: z.array(z.string().trim().min(1)),
+    pollIntervalMs: z.number().int().positive().optional(),
+  })
+  .strict();
+export type ActiveLinearIssuesConfig = z.infer<typeof ActiveLinearIssuesConfig>;
+
+/** Either canonical `issues` shape, discriminated by the presence of `provider`. */
+export const ActiveIssuesConfig = z.union([ActiveGitHubIssuesConfig, ActiveLinearIssuesConfig]);
+export type ActiveIssuesConfig = z.infer<typeof ActiveIssuesConfig>;
+
 /** The sole active persisted shape for a Sentry error source. */
 export const ActiveSentryConfig = z
   .object({
@@ -67,12 +91,25 @@ export const SystemSourceConfig = z.object({ ciInsights: z.literal(true) }).stri
 const CreateGitHubIssuesConfig = ActiveGitHubIssuesConfig.extend({
   labels: z.array(z.string().trim().min(1)).default([]),
 });
+const CreateLinearIssuesConfig = ActiveLinearIssuesConfig.extend({
+  labels: z.array(z.string().trim().min(1)).default([]),
+});
 const CreateSentryConfig = ActiveSentryConfig.omit({ managedBy: true }).extend({
   baseUrl: z.string().url().default("https://sentry.io"),
 });
 
-function schemaForSourceKind(kind: SourceKind, trusted: boolean): z.ZodType<Record<string, unknown>> {
-  if (kind === "issues") return trusted ? ActiveGitHubIssuesConfig : CreateGitHubIssuesConfig;
+// The `issues` kind serves two providers, so its schema is chosen by the same
+// fail-closed resolver the connectors use — one authority, not two. An
+// unsupported provider throws here, BEFORE any shape is decoded or persisted.
+function schemaForIssuesConfig(config: unknown, trusted: boolean): z.ZodType<Record<string, unknown>> {
+  if (resolveIssuesProvider(config) === "linear") {
+    return trusted ? ActiveLinearIssuesConfig : CreateLinearIssuesConfig;
+  }
+  return trusted ? ActiveGitHubIssuesConfig : CreateGitHubIssuesConfig;
+}
+
+function schemaForSourceKind(kind: SourceKind, config: unknown, trusted: boolean): z.ZodType<Record<string, unknown>> {
+  if (kind === "issues") return schemaForIssuesConfig(config, trusted);
   if (kind === "errors") return trusted ? ActiveSentryConfig : CreateSentryConfig;
   if (kind === "system") return SystemSourceConfig;
   if (kind === "scheduled_audit") return ScheduledAuditSourceConfig;
@@ -85,13 +122,13 @@ function schemaForSourceKind(kind: SourceKind, trusted: boolean): z.ZodType<Reco
  */
 export function parseInboxSourceCreateConfig(kind: SourceKind, config: unknown): Record<string, unknown> {
   assertNoSourceCredentialOverride(config);
-  return schemaForSourceKind(kind, false).parse(config);
+  return schemaForSourceKind(kind, config, false).parse(config);
 }
 
 /** Normalize a trusted internal write to the canonical persisted shape. */
 export function parsePersistedInboxSourceConfig(kind: SourceKind, config: unknown): Record<string, unknown> {
   assertNoSourceCredentialOverride(config);
-  return schemaForSourceKind(kind, true).parse(config);
+  return schemaForSourceKind(kind, config, true).parse(config);
 }
 
 const InboxSourceBase = z
@@ -117,7 +154,7 @@ const InboxSourceBase = z
 // retry timing, and secret metadata are independent first-class columns.
 export const InboxSource = z
   .discriminatedUnion("kind", [
-    InboxSourceBase.extend({ kind: z.literal("issues"), config: ActiveGitHubIssuesConfig.nullable() }),
+    InboxSourceBase.extend({ kind: z.literal("issues"), config: ActiveIssuesConfig.nullable() }),
     InboxSourceBase.extend({ kind: z.literal("errors"), config: ActiveSentryConfig.nullable() }),
     InboxSourceBase.extend({ kind: z.literal("system"), config: SystemSourceConfig.nullable() }),
     InboxSourceBase.extend({ kind: z.literal("manual"), config: ManualSourceConfig.nullable() }),

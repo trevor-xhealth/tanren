@@ -85,6 +85,23 @@ async function resolveRecoveryCredential(
   credentialKind: "github_app" | "github_token" | "opaque";
   ref: string;
 }> {
+  // A Linear `issues` source has no org GitHub credential to repair; its
+  // authority is the project's exact Linear integration grant, resolved the same
+  // way Sentry's is.
+  if (source.kind === "issues" && source.config !== null && "provider" in source.config) {
+    if (source.projectId === null) throw new Error("a Linear intake source must name a project");
+    const result = await new PgIntegrationAuthority().authorizeOperation(client, {
+      orgId: source.orgId,
+      projectId: source.projectId,
+      providerKind: "linear",
+      capability: "issues",
+      operation: "intake",
+      target: { resourceId: source.config.teamKey },
+      actor: systemActor,
+    });
+    if (result.status !== "eligible") throw new Error("Linear intake authority is still unavailable");
+    return { provider: "linear", credentialKind: "opaque", ref: result.lease.credentialRef };
+  }
   if (source.kind === "issues") {
     const result = await client.query<{ config: unknown }>("SELECT config FROM organizations WHERE id = $1", [
       source.orgId,

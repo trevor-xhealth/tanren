@@ -14,7 +14,7 @@ import type { OrgGithubAppInstallation } from "../../config/orgConfig.js";
 import type { GitHubHttpClient } from "../../providers/github.js";
 import { GithubAppTokenMinter } from "../../providers/githubAppTokenMinter.js";
 import { resolveGithubToken } from "../../credentials/githubTokenResolver.js";
-import { assertIntakeResponseOk, assertSupportedIssuesProvider, IntakeSourceFetchError } from "./connectorErrors.js";
+import { assertIntakeResponseOk, assertIssuesProviderIs, IntakeSourceFetchError } from "./connectorErrors.js";
 import { ActiveGitHubIssuesConfig, type IngestedItem, type InboxSource, type SourceConnector } from "./types.js";
 
 export interface GitHubConnectorDeps {
@@ -60,10 +60,10 @@ export function createGitHubIssuesConnector(deps: GitHubConnectorDeps): SourceCo
   return {
     kind: "issues",
     async fetch(source: InboxSource): Promise<IngestedItem[]> {
-      // The clean-replaced Linear/Jira connectors must fail as unsupported at
-      // the authority boundary, before config parsing can look like a generic
-      // GitHub failure and before any credential/provider I/O occurs.
-      assertSupportedIssuesProvider(source.config);
+      // An unsupported or non-GitHub `issues` config must fail at the authority
+      // boundary, before config parsing can look like a generic GitHub failure
+      // and before any credential/provider I/O occurs.
+      assertIssuesProviderIs("github", source.config);
       const config = ActiveGitHubIssuesConfig.parse(source.config);
       // Credential authority is bound to the source organization: an App
       // installation or the org-default ref selected by the intake seam. The
