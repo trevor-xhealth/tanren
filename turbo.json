@@ -1,13 +1,29 @@
 {
   "$schema": "https://turbo.build/schema.json",
   "ui": "stream",
+  // `tsconfig.base.json` is extended by EVERY package tsconfig, so it is a real
+  // input to every `typecheck` and `build`. Turborepo does not hash root files
+  // implicitly: without this line, editing the base config (e.g. `strict: false`)
+  // changes ZERO task hashes and every package replays a stale cached result.
+  // Root devDependencies (including the `typescript` version) are already covered
+  // by the lockfile-derived global external-dependency hash and need no entry here.
+  "globalDependencies": ["tsconfig.base.json"],
   "tasks": {
     "build": {
       "dependsOn": ["^build"],
       "outputs": ["dist/**"]
     },
+    // `^typecheck` is load-bearing, NOT cosmetic. `@tanren/db` publishes its
+    // types straight from source (`"types": "./src/index.ts"`), so a dependent's
+    // `tsc` reads db's `.ts` files directly — yet with an empty `dependsOn` a
+    // dependent's hash covers only its OWN directory. Breaking a db export used
+    // by allocator/dashboard/orchestrator therefore left their hashes unchanged,
+    // and `turbo run typecheck` exited 0 by replaying cached logs for three
+    // packages that no longer compiled. Depending on `^typecheck` folds each
+    // internal dependency's hash into the dependent's, so any upstream source
+    // change forces a genuine re-run.
     "typecheck": {
-      "dependsOn": []
+      "dependsOn": ["^typecheck"]
     }
   }
 }
