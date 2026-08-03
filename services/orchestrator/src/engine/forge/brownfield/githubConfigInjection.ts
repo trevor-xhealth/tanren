@@ -9,8 +9,21 @@
 // App-token resolver and tests use the in-memory fake port instead.
 
 import { GitHubPullRequestService } from "../../providers/githubPullRequestReuse.js";
-import { parseGitHubRepository, type GitHubHttpClient, type GitHubRepository } from "../../providers/github.js";
-import type { ConfigInjectionGitHub, InjectedConfigPullRequest } from "./configInjection.js";
+import {
+  decodeBase64Content,
+  parseGitHubRepository,
+  type GitHubHttpClient,
+  type GitHubRepository,
+} from "../../providers/github.js";
+import { mergeFileContent } from "./configInjection.js";
+import type { ConfigInjectionGitHub, FileMergeStrategy, InjectedConfigPullRequest } from "./configInjection.js";
+
+/** One file as it reaches the write seam: the bytes plus how to reconcile them. */
+interface InjectedFile {
+  path: string;
+  content: string;
+  merge: FileMergeStrategy;
+}
 
 function repoApi(repo: GitHubRepository, suffix: string): string {
   return `/repos/${encodeURIComponent(repo.owner)}/${encodeURIComponent(repo.name)}${suffix}`;
@@ -42,12 +55,22 @@ export class FetchConfigInjectionGitHub implements ConfigInjectionGitHub {
     headBranch: string;
     title: string;
     body: string;
-    files: ReadonlyArray<{ path: string; content: string }>;
+    files: ReadonlyArray<InjectedFile>;
   }): Promise<InjectedConfigPullRequest> {
     const repo = parseGitHubRepository(input.repoUrl);
     await this.ensureBranch(repo, input.baseBranch, input.headBranch);
+    const committed: string[] = [];
+    const skipped: string[] = [];
     for (const file of input.files) {
-      await this.commitFile(repo, input.headBranch, file.path, file.content, input.title);
+      const wrote = await this.commitFile(repo, input.headBranch, file, input.title);
+      (wrote ? committed : skipped).push(file.path);
+    }
+    // Every proposed file was already the repository's own — there is no diff to open a
+    // PR for. Fail LOUDLY rather than let GitHub reject an empty PR with a bare 422.
+    if (committed.length === 0) {
+      throw new Error(
+        `config-injection wrote nothing: the repo already owns every proposed file (${skipped.join(", ")})`,
+      );
     }
     const pr = await this.prService.ensureDraftPullRequest({
       repo,
@@ -62,7 +85,8 @@ export class FetchConfigInjectionGitHub implements ConfigInjectionGitHub {
       number: pr.number,
       url: pr.url,
       branch: input.headBranch,
-      filesCommitted: input.files.map((f) => f.path),
+      filesCommitted: committed,
+      filesSkipped: skipped,
     };
   }
 
@@ -90,37 +114,59 @@ export class FetchConfigInjectionGitHub implements ConfigInjectionGitHub {
     }
   }
 
-  /** PUT `content` to `path` on `headBranch`, carrying the prior blob sha if any. */
+  /**
+   * Reconcile `file` with whatever the repo holds at its path and PUT the result — the
+   * ONE place a target repo's bytes are overwritten, so the proposal's merge strategy is
+   * enforced HERE, against the file that actually exists (not against a guess made
+   * earlier). Returns whether a write happened; `false` means the repo's copy stands.
+   *
+   * A path that exists but whose content cannot be read (a directory, a submodule, a
+   * blob GitHub returns without inline content) is treated as the repo's: only a file
+   * tanren owns outright (`replace`) is written over it.
+   */
   private async commitFile(
     repo: GitHubRepository,
     headBranch: string,
-    path: string,
-    content: string,
+    file: InjectedFile,
     message: string,
-  ): Promise<void> {
+  ): Promise<boolean> {
     const existing = await this.deps.http.request({
       method: "GET",
-      path: repoApi(repo, `/contents/${encodeRepoPath(path)}?ref=${encodeURIComponent(headBranch)}`),
+      path: repoApi(repo, `/contents/${encodeRepoPath(file.path)}?ref=${encodeURIComponent(headBranch)}`),
       token: this.deps.token,
       refreshToken: this.deps.refreshToken,
     });
-    const sha = existing.status === 200 ? contentSha(existing.body) : undefined;
+    const present = existing.status === 200;
+    const current = present ? contentText(existing.body) : undefined;
+    if (present && current === undefined && file.merge !== "replace") return false;
+    const next = mergeFileContent(file, present ? (current ?? "") : undefined);
+    if (next === undefined) return false;
+    const sha = present ? contentSha(existing.body) : undefined;
     const put = await this.deps.http.request({
       method: "PUT",
-      path: repoApi(repo, `/contents/${encodeRepoPath(path)}`),
+      path: repoApi(repo, `/contents/${encodeRepoPath(file.path)}`),
       token: this.deps.token,
       refreshToken: this.deps.refreshToken,
       body: {
-        message: `${message}: ${path}`,
+        message: `${message}: ${file.path}`,
         branch: headBranch,
-        content: Buffer.from(content, "utf8").toString("base64"),
+        content: Buffer.from(next, "utf8").toString("base64"),
         ...(sha === undefined ? {} : { sha }),
       },
     });
     if (put.status !== 200 && put.status !== 201) {
-      throw new Error(`could not commit ${path}: HTTP ${put.status}`);
+      throw new Error(`could not commit ${file.path}: HTTP ${put.status}`);
     }
+    return true;
   }
+}
+
+/** The decoded UTF-8 body of a `/contents` response, or `undefined` when unreadable. */
+function contentText(body: unknown): string | undefined {
+  if (typeof body !== "object" || body === null || Array.isArray(body)) return undefined;
+  const record = body as { content?: unknown; encoding?: unknown };
+  if (typeof record.content !== "string") return undefined;
+  return record.encoding === "base64" ? decodeBase64Content(record.content) : record.content;
 }
 
 function baseRefSha(body: unknown): string {

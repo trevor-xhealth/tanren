@@ -144,11 +144,26 @@ describe("config-injection · 6 files + per-file exclude + open PR", () => {
   });
 
   it("omits the justfile when the repo already ships one (never clobbers the lifecycle)", () => {
-    const files = proposeConfigFiles({ ...proposeInput, repoHasJustfile: true });
+    const files = proposeConfigFiles({ ...proposeInput, existingPaths: ["justfile"] });
     expect(files).toHaveLength(5);
     expect(files.map((f) => f.path)).not.toContain("justfile");
     // The ci.yml is still injected (Tanren's gate definition).
     expect(files.map((f) => f.path)).toContain(".tanren/ci.yml");
+  });
+
+  it("generalizes the guard: every skip-if-present file the repo owns is dropped", () => {
+    const owned = ["justfile", "CODEOWNERS", ".github/PULL_REQUEST_TEMPLATE.md", ".tanren/ci.yml"];
+    const files = proposeConfigFiles({ ...proposeInput, existingPaths: owned });
+    for (const path of owned) {
+      expect(files.map((f) => f.path)).not.toContain(path);
+    }
+    // `.gitignore` is ADDITIVE, so it is still proposed even though the repo has one —
+    // the write seam appends the missing lines instead of replacing the file.
+    const paths = files.map((f) => f.path);
+    expect(proposeConfigFiles({ ...proposeInput, existingPaths: [...owned, ".gitignore"] }).map((f) => f.path)).toEqual(
+      paths,
+    );
+    expect(paths).toEqual([".tanren/PROJECT.md", ".gitignore"]);
   });
 
   it("the injected justfile is a STACK-AGNOSTIC skeleton whose targets fail LOUDLY until filled", () => {

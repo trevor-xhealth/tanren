@@ -473,6 +473,7 @@
     "pubspec",
     "pulumi",
     "punit",
+    "pycache",
     "pydantic",
     "pygopher",
     "pypi",
