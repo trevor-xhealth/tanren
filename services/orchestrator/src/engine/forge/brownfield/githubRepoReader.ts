@@ -1,14 +1,16 @@
 // the real GitHub `RepoReader` behind the recon step. Reads the linked
 // repo READ-ONLY through the SAME token resolution + injectable
 // `GitHubHttpClient` as the rest of the brownfield reader — it lists the repo tree and
-// pulls a small set of high-signal files (manifests, READMEs, CI workflows) for
-// the recon Answerer to reason over. It NEVER writes to the target repo.
+// pulls a small set of high-signal files (project manifests and build config
+// across ecosystems, READMEs, CI pipelines) for the recon Answerer to reason
+// over. It NEVER writes to the target repo.
 //
 // The HTTP client + token are injected, so the orchestrator wires it from the
 // App-token resolver and tests use the in-memory fake `RepoReader` instead.
 
 import { parseGitHubRepository, type GitHubHttpClient, type GitHubRepository } from "../../providers/github.js";
 import type { ResolvedGithubToken } from "../../credentials/githubTokenResolver.js";
+import { rankSignalPaths } from "./reconSignalFiles.js";
 import type { ReconIndex, ReconIndexedFile, RepoReader } from "./types.js";
 
 // How many files to read content for (the rest are path-only in the index).
@@ -16,74 +18,12 @@ const MAX_CONTENT_FILES = 24;
 // Per-file preview cap (kept small for prompt economy at the Answerer).
 const PREVIEW_BYTES = 4 * 1024;
 
-// High-signal path fragments worth pulling content for during recon, split into
-// the tiers that decide WHICH of them get read when there are more matches than
-// content slots. Recon always reads a bounded slice, so the selection RULE is
-// load-bearing: reading "whatever the tree API listed first" is reading whatever
-// sorts first alphabetically, which in any layered repo means the `.github/`
-// directory and the earliest nested workspaces — the repo's OWN manifests never
-// make the cut and are handed to the Answerer with empty previews.
-//
-// Manifests + build config describe how the repo is assembled; CI workflows
-// describe the contracts it enforces repo-wide; per-package prose is the least
-// dense of the three. Root-level files describe the WHOLE repo, so they lead
-// regardless of class (and there are only ever a handful of them).
-const MANIFEST_FRAGMENTS = ["package.json", "tsconfig", "prisma/schema.prisma"];
-const CI_FRAGMENTS = [".github/workflows/", "codeowners"];
-const DOC_FRAGMENTS = ["readme"];
-
-// Every fragment recon pulls content for — the union of the tiers above.
-const SIGNAL_FRAGMENTS = [...MANIFEST_FRAGMENTS, ...CI_FRAGMENTS, ...DOC_FRAGMENTS];
-
-// Selection tiers, most-informative first (see the fragment split above).
-const ROOT_TIER = 0;
-const CI_TIER = 1;
-const NESTED_MANIFEST_TIER = 2;
-const NESTED_DOC_TIER = 3;
+// WHICH files fill those slots — the candidate set and the ranking over it — is
+// the load-bearing judgement here, and it lives in `reconSignalFiles.ts`. This
+// class is the I/O: list the tree, then pull previews for what the policy chose.
 
 function repoApi(repo: GitHubRepository, suffix: string): string {
   return `/repos/${encodeURIComponent(repo.owner)}/${encodeURIComponent(repo.name)}${suffix}`;
-}
-
-function matchesAny(lowerPath: string, fragments: readonly string[]): boolean {
-  return fragments.some((fragment) => lowerPath.includes(fragment));
-}
-
-function isSignalPath(path: string): boolean {
-  return matchesAny(path.toLowerCase(), SIGNAL_FRAGMENTS);
-}
-
-// How many directories deep a path sits (0 == a root-level file).
-function pathDepth(path: string): number {
-  return path.split("/").length - 1;
-}
-
-function signalTier(path: string): number {
-  const lower = path.toLowerCase();
-  if (pathDepth(path) === 0) return ROOT_TIER;
-  if (matchesAny(lower, CI_FRAGMENTS)) return CI_TIER;
-  if (matchesAny(lower, MANIFEST_FRAGMENTS)) return NESTED_MANIFEST_TIER;
-  return NESTED_DOC_TIER;
-}
-
-// The final tiebreak. Compares by CODE UNIT rather than `localeCompare` so the
-// ordering is identical on every host — a locale-sensitive collation would make
-// the selection depend on the machine recon happens to run on.
-function comparePaths(left: string, right: string): number {
-  return left < right ? -1 : left > right ? 1 : 0;
-}
-
-// The signal paths in the order recon should spend its content budget on them:
-// tier first, then shallower before deeper (a workspace nearer the root
-// describes more of the repo), then the path itself so a given tree always
-// yields the SAME selection no matter what order the trees API returned it in.
-function rankSignalPaths(paths: readonly string[]): string[] {
-  return [...paths]
-    .filter((path) => isSignalPath(path))
-    .sort(
-      (left, right) =>
-        signalTier(left) - signalTier(right) || pathDepth(left) - pathDepth(right) || comparePaths(left, right),
-    );
 }
 
 interface TreeEntry {

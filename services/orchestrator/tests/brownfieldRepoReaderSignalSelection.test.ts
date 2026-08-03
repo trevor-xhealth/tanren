@@ -16,25 +16,21 @@
 // extractor (it bails on an empty preview).
 //
 // No network and no module mocking: the reader's injected `GitHubHttpClient`
-// seam serves the tree and the file contents, and the assertions are on the
+// seam (shared with the polyglot suite via `brownfieldRepoReader.fixtures.ts`)
+// serves the tree and the file contents, and the assertions are on the
 // observable outcome (the returned index's previews) plus the order in which
 // the reader actually asked for content.
 
 import { describe, expect, it } from "vitest";
-import type { ResolvedGithubToken } from "../src/engine/credentials/githubTokenResolver.js";
-import type { GitHubHttpClient, GitHubHttpRequest, GitHubHttpResponse } from "../src/engine/providers/github.js";
-import { GithubRepoReader } from "../src/engine/forge/brownfield/githubRepoReader.js";
-
-const DEFAULT_BRANCH = "main";
-const REPO_URL = "https://github.com/acme/monorepo";
-
-function padded(n: number): string {
-  return String(n).padStart(2, "0");
-}
-
-function upTo(count: number): number[] {
-  return Array.from({ length: count }, (_, i) => i + 1);
-}
+import {
+  REPO_URL,
+  TreeServingGitHubClient,
+  contentsOf,
+  padded,
+  previewOf,
+  readerOver,
+  upTo,
+} from "./brownfieldRepoReader.fixtures.js";
 
 /**
  * A synthetic monorepo tree, in the order the GitHub trees API returns it (git
@@ -70,57 +66,6 @@ const UNCONTESTED_TREE = syntheticTreePaths({ workspaces: 2, workflows: 2 });
 
 const ROOT_MANIFESTS = ["package.json", "tsconfig.json"];
 
-/** Serves the synthetic tree + per-file contents, recording what was asked for. */
-class TreeServingGitHubClient implements GitHubHttpClient {
-  /** Paths the reader pulled CONTENT for, in the order it pulled them. */
-  readonly contentReads: string[] = [];
-
-  constructor(private readonly treePaths: readonly string[]) {}
-
-  async request(input: GitHubHttpRequest): Promise<GitHubHttpResponse> {
-    if (input.path.includes("/git/trees/")) {
-      return {
-        status: 200,
-        body: {
-          tree: this.treePaths.map((path) => ({ path, type: "blob", size: path.length })),
-        },
-      };
-    }
-    const contents = /\/contents\/(?<path>[^?]+)/u.exec(input.path);
-    if (contents?.groups?.["path"] !== undefined) {
-      // The reader percent-encodes each path SEGMENT and rejoins on "/", so undo
-      // it the same way (a whole-string decode would turn an encoded %2F into a
-      // separator).
-      const path = contents.groups["path"]
-        .split("/")
-        .map((segment) => decodeURIComponent(segment))
-        .join("/");
-      this.contentReads.push(path);
-      return {
-        status: 200,
-        body: { encoding: "utf-8", content: `contents of ${path}` },
-      };
-    }
-    return { status: 404, body: {} };
-  }
-}
-
-const resolved: ResolvedGithubToken = {
-  token: "gh_test_token",
-  source: "static",
-  async refresh() {
-    return "gh_test_token";
-  },
-};
-
-function readerOver(http: GitHubHttpClient): GithubRepoReader {
-  return new GithubRepoReader({ http, resolved, defaultBranch: DEFAULT_BRANCH });
-}
-
-function previewOf(files: { path: string; preview: string }[], path: string): string {
-  return files.find((file) => file.path === path)?.preview ?? "";
-}
-
 const isNestedReadme = (path: string): boolean => path.includes("/") && path.toLowerCase().endsWith("readme.md");
 const isWorkflow = (path: string): boolean => path.startsWith(".github/workflows/");
 
@@ -138,9 +83,9 @@ describe("GithubRepoReader · signal-file selection under a bounded content budg
 
     // The regression itself: the repo's OWN manifests must carry content.
     for (const manifest of ROOT_MANIFESTS) {
-      expect(previewOf(index.files, manifest)).toBe(`contents of ${manifest}`);
+      expect(previewOf(index.files, manifest)).toBe(contentsOf(manifest));
     }
-    expect(previewOf(index.files, "README.md")).toBe("contents of README.md");
+    expect(previewOf(index.files, "README.md")).toBe(contentsOf("README.md"));
 
     // …and they are read FIRST, ahead of the CI workflows that used to crowd
     // them out entirely.
