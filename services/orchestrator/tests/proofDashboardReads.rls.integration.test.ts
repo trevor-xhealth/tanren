@@ -192,12 +192,14 @@ async function seedTenant(owner: Pool): Promise<void> {
     [ORG_A, PROJECT, BEHAVIOR_REVISION, CAS, NODE_ID],
   );
 
-  // Flake quarantine (put INTO quarantine — excluded_from_green, flaky).
+  // Flake quarantine (put INTO quarantine — excluded_from_green, flaky). `epoch` is the
+  // mq-7 code-generation epoch (migration 0091, NOT NULL + sha256 CHECK); it matches the
+  // artifact digest the seeded verdicts were produced from.
   await owner.query(
     `INSERT INTO behavior_flake_quarantines
-       (org_id, project_id, id, behavior_revision_id, transition, gate_effect, classification, reason, actor, evidence, context_hash)
-     VALUES ($1, $2, 'q_pd', $3, 'quarantine', 'excluded_from_green', 'flaky', 'flip observed', 'auto', '[{"verdictId":"v1","outcome":"passed"}]'::jsonb, $4)`,
-    [ORG_A, PROJECT, BEHAVIOR_REVISION, D],
+       (org_id, project_id, id, behavior_revision_id, transition, gate_effect, classification, reason, actor, evidence, context_hash, epoch)
+     VALUES ($1, $2, 'q_pd', $3, 'quarantine', 'excluded_from_green', 'flaky', 'flip observed', 'auto', '[{"verdictId":"v1","outcome":"passed"}]'::jsonb, $4, $5)`,
+    [ORG_A, PROJECT, BEHAVIOR_REVISION, D, CAS],
   );
 }
 

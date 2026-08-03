@@ -1181,18 +1181,111 @@ smoke-rls-self-healing-funnel:
 smoke-rls-deploy-verification-environment:
   DATABASE_URL="${DATABASE_URL:-postgres://tanren:tanren@localhost:5432/tanren}" TANREN_RLS_DB_TEST=1 corepack pnpm exec vitest run --no-file-parallelism services/orchestrator/tests/deployVerificationEnvironment.rls.integration.test.ts
 
+# rv-24: exportable proof bundle — org-scoped export assembles a tamper-evident bundle
+# from the real persisted acceptance rows; a failed verdict stays failed; cross-org sees zero.
 smoke-rls-proof-bundle:
   DATABASE_URL="${DATABASE_URL:-postgres://tanren:tanren@localhost:5432/tanren}" TANREN_RLS_DB_TEST=1 corepack pnpm exec vitest run --no-file-parallelism services/orchestrator/tests/proofBundleExport.rls.integration.test.ts
 
-smoke: compose-build compose-up wait-for-stack smoke-connectivity smoke-ssh-integration smoke-plane-split-worker smoke-plane-split-worker-remote-writes smoke-plane-split-p3 smoke-plane-split-p3b smoke-plane-split-p3c smoke-rls-r1 smoke-rls-r2 smoke-rls-r2-cohort2 smoke-rls-r2-cohort3 smoke-rls-r2-cohort4 smoke-rls-r3a smoke-rls-r3a-worker smoke-rls-r3b smoke-rls-early-finalize smoke-rls-org-bootstrap smoke-rls-operator-flow smoke-rls-http-route-scoping smoke-rls-org-costs smoke-rls-run-lifecycle smoke-rls-issue-loop smoke-rls-spec-origins smoke-rls-integration-lifecycle smoke-rls-binding-materializer smoke-rls-integration-fragments smoke-rls-behavior-coverage smoke-rls-merge-queue-authority smoke-integration-vault-cas smoke-rls-allocator smoke-rls-event-integrity smoke-rls-environments smoke-rls-design-contracts smoke-rls-governance-policy smoke-rls-design-foundation smoke-rls-integration-events smoke-rls-webhook-intake smoke-rls-merge-partitions smoke-rls-governance-bindings smoke-e2e-artifacts smoke-budget-gate smoke-merge-authority smoke-rls-merge-bundle-scope smoke-rls-symptom-contracts smoke-rls-production-verification smoke-rls-symptom-evidence smoke-rls-baseline-reproduction smoke-rls-issue-source smoke-rls-source-sync-worker smoke-rls-land-groups smoke-rls-governance-tiers smoke-rls-fixture-leases smoke-rls-effect-observations smoke-rls-integration-proof-units smoke-rls-repo-visibility smoke-rls-resolution-jobs smoke-rls-resolution-decisions smoke-rls-resolution-authority smoke-rls-remediation-attempts smoke-rls-release-instances smoke-rls-resolution-walker smoke-rls-resolution-proof smoke-rls-self-healing-funnel smoke-rls-verdict-substrate smoke-rls-behavior-revision-mint smoke-rls-acceptance-orchestrator smoke-rls-causal-correlation smoke-rls-post-merge-reproof smoke-rls-acceptance-plan-loader smoke-rls-verification-fragment-registry smoke-rls-acceptance-execute-behaviors smoke-rls-proof-backed-demo smoke-rls-deploy-verification-environment smoke-rls-proof-bundle smoke-rls-openrouter-cost-attribution smoke-rls-merge-repair-routes # rv-24: exportable proof bundle — org-scoped export assembles a tamper-evident bundle # from the real persisted acceptance rows; a failed verdict stays failed; cross-org sees zero. smoke-rls-proof-bundle: DATABASE_URL="${DATABASE_URL:-postgres://tanren:tanren@localhost:5432/tanren}" TANREN_RLS_DB_TEST=1 corepack pnpm exec vitest run --no-file-parallelism services/orchestrator/tests/proofBundleExport.rls.integration.test.ts smoke-rls-post-merge-behavior-verdict smoke-rls-verification-reads smoke-rls-proof-dashboard smoke-rls-catalog-import
-# rv-24: exportable proof bundle — org-scoped export assembles a tamper-evident bundle
-# from the real persisted acceptance rows; a failed verdict stays failed; cross-org sees zero.
+# The merge-queue gate: ci-heavy.yml runs this as step 2, so anything missing
+# from this list is coverage that exists on paper and executes nowhere.
+# ONE dependency per line, deliberately. This list used to be a single ~2.5 KB
+# line; a stray `#` pasted mid-list silently truncated every dependency after
+# it (four real-Postgres RLS proofs went unrun), and its shape forced a
+# cherry-pick conflict on every branch that added a smoke recipe. Keep it
+# one-per-line: `just` continues a dependency list across lines with a trailing
+# backslash, and a comment can never swallow more than its own line.
+smoke: \
+  compose-build \
+  compose-up \
+  wait-for-stack \
+  smoke-connectivity \
+  smoke-ssh-integration \
+  smoke-plane-split-worker \
+  smoke-plane-split-worker-remote-writes \
+  smoke-plane-split-p3 \
+  smoke-plane-split-p3b \
+  smoke-plane-split-p3c \
+  smoke-rls-r1 \
+  smoke-rls-r2 \
+  smoke-rls-r2-cohort2 \
+  smoke-rls-r2-cohort3 \
+  smoke-rls-r2-cohort4 \
+  smoke-rls-r3a \
+  smoke-rls-r3a-worker \
+  smoke-rls-r3b \
+  smoke-rls-early-finalize \
+  smoke-rls-org-bootstrap \
+  smoke-rls-operator-flow \
+  smoke-rls-http-route-scoping \
+  smoke-rls-org-costs \
+  smoke-rls-run-lifecycle \
+  smoke-rls-issue-loop \
+  smoke-rls-spec-origins \
+  smoke-rls-integration-lifecycle \
+  smoke-rls-binding-materializer \
+  smoke-rls-integration-fragments \
+  smoke-rls-behavior-coverage \
+  smoke-rls-merge-queue-authority \
+  smoke-integration-vault-cas \
+  smoke-rls-allocator \
+  smoke-rls-event-integrity \
+  smoke-rls-environments \
+  smoke-rls-design-contracts \
+  smoke-rls-governance-policy \
+  smoke-rls-design-foundation \
+  smoke-rls-integration-events \
+  smoke-rls-webhook-intake \
+  smoke-rls-merge-partitions \
+  smoke-rls-governance-bindings \
+  smoke-e2e-artifacts \
+  smoke-budget-gate \
+  smoke-merge-authority \
+  smoke-rls-merge-bundle-scope \
+  smoke-rls-symptom-contracts \
+  smoke-rls-production-verification \
+  smoke-rls-symptom-evidence \
+  smoke-rls-baseline-reproduction \
+  smoke-rls-issue-source \
+  smoke-rls-source-sync-worker \
+  smoke-rls-land-groups \
+  smoke-rls-governance-tiers \
+  smoke-rls-fixture-leases \
+  smoke-rls-effect-observations \
+  smoke-rls-integration-proof-units \
+  smoke-rls-repo-visibility \
+  smoke-rls-resolution-jobs \
+  smoke-rls-resolution-decisions \
+  smoke-rls-resolution-authority \
+  smoke-rls-remediation-attempts \
+  smoke-rls-release-instances \
+  smoke-rls-resolution-walker \
+  smoke-rls-resolution-proof \
+  smoke-rls-self-healing-funnel \
+  smoke-rls-verdict-substrate \
+  smoke-rls-behavior-revision-mint \
+  smoke-rls-acceptance-orchestrator \
+  smoke-rls-causal-correlation \
+  smoke-rls-post-merge-reproof \
+  smoke-rls-acceptance-plan-loader \
+  smoke-rls-verification-fragment-registry \
+  smoke-rls-acceptance-execute-behaviors \
+  smoke-rls-proof-backed-demo \
+  smoke-rls-deploy-verification-environment \
+  smoke-rls-proof-bundle \
+  smoke-rls-openrouter-cost-attribution \
+  smoke-rls-merge-repair-routes \
+  smoke-rls-post-merge-behavior-verdict \
+  smoke-rls-verification-reads \
+  smoke-rls-proof-dashboard \
+  smoke-rls-catalog-import
+
 # tanren.behavior.v0 / tanren.persona.v0 catalog import — a synthetic catalog
 # imports with identity, persona links and cross-references intact; an unresolvable
 # persona slug, a dangling cross-reference and a duplicate B-#### each fail loudly and
 # write nothing; re-import is idempotent on row counts; cross-org reads see zero rows.
 smoke-rls-catalog-import:
   DATABASE_URL="${DATABASE_URL:-postgres://tanren:tanren@localhost:5432/tanren}" TANREN_RLS_DB_TEST=1 corepack pnpm exec vitest run --no-file-parallelism services/orchestrator/tests/catalogImport.rls.integration.test.ts
+
 
 # rv-22: runtime-verification HTTP read surface — real Hono route → real DB → real
 # response, a failed verdict stays failed, cross-org reads see zero rows.
