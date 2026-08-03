@@ -13,9 +13,26 @@
 //
 // This module performs no execution. It only classifies a config-resolution error and
 // projects it onto the gate's existing `{ passed: false }` result shape.
-import { CiConfigValidationError, CiYamlParseError, type CiWhen } from "../../ci/index.js";
+import {
+  CiConfigValidationError,
+  CiYamlParseError,
+  GateContractBaselineError,
+  GateContractWeakenedError,
+  type CiWhen,
+} from "../../ci/index.js";
 import type { GateAppendEvent } from "./runGateTier.js";
 import type { GateOutcome } from "./runGateForWhen.js";
+
+/**
+ * The gate-contract errors this boundary projects onto a fail-closed gate FAILURE. All four are
+ * "the repo's gate contract cannot be used to judge this head", and all four are writer/operator
+ * fixable in-place — as opposed to a substrate read fault, which keeps its loud-throw semantics.
+ */
+export type UnusableCiConfigError =
+  | CiConfigValidationError
+  | CiYamlParseError
+  | GateContractWeakenedError
+  | GateContractBaselineError;
 
 // The synthetic tier/step names the invalid-config failure surfaces under. They are
 // STABLE so a recurring invalid-config failure dedupes across loop iterations (the
@@ -25,15 +42,24 @@ export const CI_CONFIG_GATE_TIER = "tanren-ci-config";
 export const CI_CONFIG_GATE_STEP = "validate";
 
 /**
- * True iff `error` is a `.tanren/ci.yml` validation/parse error — the gate-config
- * boundary's two documented "the repo's config is broken" classes (schema-invalid vs
- * YAML-syntax). A read FAILURE (substrate/timeout) is DELIBERATELY excluded: that is a
- * transient substrate fault (`GateConfigReadError`), not the repo shipping a bad
- * config, and must keep its existing loud-throw → run-fail semantics (no-silent-
- * fallback: a substrate hiccup must never be recast as a fixable config finding).
+ * True iff `error` means the head's `.tanren/ci.yml` cannot legitimately judge this run — the
+ * gate-config boundary's "the repo's contract is unusable" family: schema-invalid, YAML-syntax,
+ * the head WEAKENING the contract it is graded by (`GateContractWeakenedError`), or an
+ * explicitly-named contract baseline that could not be read (`GateContractBaselineError` — fail
+ * closed: unable to tell whether the bar was lowered is not permission to lower it).
+ *
+ * A read FAILURE (substrate/timeout) is DELIBERATELY excluded: that is a transient substrate
+ * fault (`GateConfigReadError`), not the repo shipping an unusable contract, and must keep its
+ * existing loud-throw → run-fail semantics (no-silent-fallback: a substrate hiccup must never be
+ * recast as a fixable config finding).
  */
-export function isInvalidCiConfigError(error: unknown): error is CiConfigValidationError | CiYamlParseError {
-  return error instanceof CiConfigValidationError || error instanceof CiYamlParseError;
+export function isInvalidCiConfigError(error: unknown): error is UnusableCiConfigError {
+  return (
+    error instanceof CiConfigValidationError ||
+    error instanceof CiYamlParseError ||
+    error instanceof GateContractWeakenedError ||
+    error instanceof GateContractBaselineError
+  );
 }
 
 /**
@@ -49,7 +75,7 @@ export function isInvalidCiConfigError(error: unknown): error is CiConfigValidat
  * is fixed.
  */
 export async function invalidCiConfigGateOutcome(
-  error: CiConfigValidationError | CiYamlParseError,
+  error: UnusableCiConfigError,
   when: CiWhen,
   appendEvent: GateAppendEvent,
   taskId?: string,

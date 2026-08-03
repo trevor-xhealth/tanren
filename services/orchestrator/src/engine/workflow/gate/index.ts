@@ -21,7 +21,17 @@ export {
   CI_CONFIG_GATE_TIER,
   invalidCiConfigGateOutcome,
   isInvalidCiConfigError,
+  type UnusableCiConfigError,
 } from "./gateConfigFailure.js";
+// GATE-CONTRACT RATCHET: refuse to be graded by a head `.tanren/ci.yml` that demands less than
+// the contract this run is based on (a run may STRENGTHEN its own gate, never lower its bar).
+export {
+  assertGateContractNotWeakened,
+  gateContractRatchetFailure,
+  resolveContractBaseline,
+  type ContractBaseline,
+  type ContractRatchetInput,
+} from "./contractRatchet.js";
 export {
   BOOTSTRAP_GATE_STEP,
   BOOTSTRAP_GATE_TIER,

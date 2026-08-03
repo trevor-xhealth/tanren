@@ -13,8 +13,10 @@ import type { CommandSubstrate } from "../../contracts/commandSubstrate.js";
 import { quoteSshShellArg } from "../../ssh/command.js";
 import { outputOnlyWatchdog } from "../../ssh/activityWatchdog.js";
 
-// The native gate-definition path, relative to the workspace root.
-const CI_CONFIG_FILENAME = ".tanren/ci.yml";
+// The native gate-definition path, relative to the workspace root. Exported so the
+// gate-contract ratchet (contractRatchet.ts) reads the SAME path out of git history — one
+// definition of "the repo's gate contract", never two that can drift apart.
+export const CI_CONFIG_FILENAME = ".tanren/ci.yml";
 
 export interface ResolveGateConfigInput {
   ssh: CommandSubstrate;
