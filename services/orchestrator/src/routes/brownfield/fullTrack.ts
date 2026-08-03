@@ -44,6 +44,7 @@ import {
   FetchConfigInjectionGitHub,
   GithubRepoReader,
   openConfigInjectionPr,
+  ownedInjectionPaths,
   proposeConfigFiles,
   runRecon,
   seedDagFromReconAndIssues,
@@ -153,6 +154,10 @@ export function createBrownfieldFullTrackRoutes(options: BrownfieldFullTrackOpti
         projectId: guard.projectId,
         repoUrl: guard.repoUrl,
         report,
+        // Recon is the only step that sees the repo TREE. Carry the injectable paths it
+        // already owns forward on the signed state so config-injection proposes only what
+        // it may actually write — the guard has to ride the state or it is not wired.
+        existingPaths: ownedInjectionPaths(index.files.map((file) => file.path)),
       });
       return c.json({ repoUrl: guard.repoUrl, filesIndexed: index.filesIndexed, report, state }, 200);
     } catch (error) {
@@ -187,6 +192,10 @@ export function createBrownfieldFullTrackRoutes(options: BrownfieldFullTrackOpti
         report: state.report,
         posture: parsed.data.posture,
         generatedAt: new Date().toISOString(),
+        // What recon observed the repo already owns — a `skip_if_present` file at one of
+        // these paths is not proposed at all (the repo's justfile / CODEOWNERS / PR
+        // template stay its own).
+        existingPaths: state.existingPaths,
       },
       parsed.data.excludePaths,
     );

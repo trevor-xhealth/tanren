@@ -90,14 +90,40 @@ export interface ProposeFilesInput {
   /** The owner team for CODEOWNERS scaffolding (defaults from the org login). */
   operatorsTeam?: string;
   /**
-   * Whether the brownfield repo ALREADY ships a `justfile` (the project's lifecycle
-   * contract). When it does (recon observed one), we do NOT inject the stub justfile
-   * — the repo owns its lifecycle and we must not clobber it. When it does NOT, we
-   * seed the stack-agnostic skeleton justfile so the injected `.tanren/ci.yml`'s
-   * `just <target>` steps have something to defer to (the operator fills in the
-   * stubs for their stack). Defaults to `false` (seed the skeleton).
+   * Injectable paths the repository ALREADY has — `ownedInjectionPaths` applied to the
+   * recon index's tree. Every `skip_if_present` proposal at one of these paths is dropped,
+   * so the operator's preview shows what will actually land: no stub justfile on top of a
+   * repo that already declares its lifecycle, no blanket CODEOWNERS over per-directory
+   * ownership. Defaults to empty (nothing known ⇒ propose everything); the write seam
+   * still enforces the same strategy against the file that actually exists, so an empty
+   * or stale list can never turn into a clobber.
    */
-  repoHasJustfile?: boolean;
+  existingPaths?: ReadonlyArray<string>;
+}
+
+/**
+ * Every repo path config injection may write, by role. The SINGLE source of the path set:
+ * the proposals below are keyed off it, and `ownedInjectionPaths` reads it to decide which
+ * tree entries recon must remember.
+ */
+export const CONFIG_INJECTION_PATHS = Object.freeze({
+  snapshot: ".tanren/PROJECT.md",
+  gate: SKELETON_CI_CONFIG_PATH,
+  justfile: SKELETON_JUSTFILE_PATH,
+  codeowners: "CODEOWNERS",
+  gitignore: ".gitignore",
+  pullRequestTemplate: ".github/PULL_REQUEST_TEMPLATE.md",
+} as const);
+
+/**
+ * The injectable paths present in a repository tree. Recon calls this on the index it
+ * already reads, and the bounded (≤6-entry) result rides on the signed onboarding state
+ * to the config-injection step — which is what makes the "repo owns this file" guard a
+ * real value rather than a documented default nobody passes.
+ */
+export function ownedInjectionPaths(repoPaths: ReadonlyArray<string>): string[] {
+  const injectable = new Set<string>(Object.values(CONFIG_INJECTION_PATHS));
+  return [...new Set(repoPaths)].filter((path) => injectable.has(path));
 }
 
 function postureLine(posture: GovernancePosture): string {
@@ -173,20 +199,21 @@ function countLines(content: string): number {
 /**
  * Build the proposed integration files from the recon report + posture. The
  * order matches the hi-fi file column. `excludePaths` removes any the operator
- * unchecked before the PR is opened.
+ * unchecked before the PR is opened, and `input.existingPaths` (what recon saw in the
+ * repo tree) removes every `skip_if_present` file the repository already owns — the
+ * generalization of the old justfile-only guard.
  *
  * STACK-AGNOSTIC: the injected `.tanren/ci.yml` defers to `just <target>`, so we
  * ALSO seed the skeleton `justfile` (the project's lifecycle contract) when the repo
  * ships none — otherwise the injected gate's `just bootstrap`/`just tier-1` steps
- * have nothing to defer to. When `input.repoHasJustfile` is true (recon observed
- * one) the justfile is omitted: the repo owns its lifecycle and we never clobber it.
+ * have nothing to defer to. A repo that already declares its lifecycle keeps it.
  */
 export function proposeConfigFiles(input: ProposeFilesInput, excludePaths: ReadonlyArray<string> = []): ProposedFile[] {
   const team = input.operatorsTeam ?? `${input.orgLogin}/tanren-operators`;
   const snapshot = projectSnapshot(input);
   const all: ProposedFile[] = [
     {
-      path: ".tanren/PROJECT.md",
+      path: CONFIG_INJECTION_PATHS.snapshot,
       content: snapshot,
       addedLines: countLines(snapshot),
       // tanren's own namespace + explicitly "don't edit by hand, regenerated via the
@@ -195,29 +222,25 @@ export function proposeConfigFiles(input: ProposeFilesInput, excludePaths: Reado
       snapshot: true,
     },
     {
-      path: SKELETON_CI_CONFIG_PATH,
+      path: CONFIG_INJECTION_PATHS.gate,
       content: TANREN_CI_CONFIG,
       addedLines: countLines(TANREN_CI_CONFIG),
       // A repo can EDIT this file to change what the gate runs (see the header), so a
       // re-injection must never silently revert the operator's gate definition.
       merge: "skip_if_present",
     },
-    // The stack-agnostic justfile skeleton. `skip_if_present`: the repo's own lifecycle
-    // is authoritative — the LOUD-STUB targets would fail every tier if they landed on
-    // top of it. When the repo ships none, this seeds something for the injected ci.yml's
-    // `just <target>` steps to defer to (the operator fills in the stubs for their stack).
-    ...(input.repoHasJustfile === true
-      ? []
-      : [
-          {
-            path: SKELETON_JUSTFILE_PATH,
-            content: SKELETON_JUSTFILE,
-            addedLines: countLines(SKELETON_JUSTFILE),
-            merge: "skip_if_present" as const,
-          },
-        ]),
     {
-      path: "CODEOWNERS",
+      // The stack-agnostic justfile skeleton. `skip_if_present`: the repo's own lifecycle
+      // is authoritative — the LOUD-STUB targets would fail every tier if they landed on
+      // top of it. When the repo ships none this seeds something for the injected
+      // ci.yml's `just <target>` steps to defer to (the operator fills in the stubs).
+      path: CONFIG_INJECTION_PATHS.justfile,
+      content: SKELETON_JUSTFILE,
+      addedLines: countLines(SKELETON_JUSTFILE),
+      merge: "skip_if_present",
+    },
+    {
+      path: CONFIG_INJECTION_PATHS.codeowners,
       content: codeowners(team),
       addedLines: countLines(codeowners(team)),
       // A blanket `* @org/tanren-operators` would erase per-directory ownership — the
@@ -225,7 +248,7 @@ export function proposeConfigFiles(input: ProposeFilesInput, excludePaths: Reado
       merge: "skip_if_present",
     },
     {
-      path: ".gitignore",
+      path: CONFIG_INJECTION_PATHS.gitignore,
       content: TANREN_GITIGNORE,
       addedLines: countLines(TANREN_GITIGNORE),
       // ADDITIVE — the one file we extend rather than own. Replacing it would drop the
@@ -234,7 +257,7 @@ export function proposeConfigFiles(input: ProposeFilesInput, excludePaths: Reado
       merge: "append_if_absent",
     },
     {
-      path: ".github/PULL_REQUEST_TEMPLATE.md",
+      path: CONFIG_INJECTION_PATHS.pullRequestTemplate,
       content: "## summary\n\n## spec\n\n<!-- tanren spec link -->\n",
       addedLines: 4,
       // A repo's PR template often carries compliance checklists. Never overwrite it.
@@ -242,7 +265,8 @@ export function proposeConfigFiles(input: ProposeFilesInput, excludePaths: Reado
     },
   ];
   const excluded = new Set(excludePaths);
-  return all.filter((file) => !excluded.has(file.path));
+  const owned = new Set(input.existingPaths ?? []);
+  return all.filter((file) => !excluded.has(file.path) && !(file.merge === "skip_if_present" && owned.has(file.path)));
 }
 
 // ── The injectable GitHub side (open-the-PR) ───────────────────────────────

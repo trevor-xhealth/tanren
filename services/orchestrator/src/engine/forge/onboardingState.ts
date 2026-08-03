@@ -34,6 +34,11 @@ const ReconState = StateBase.extend({
   projectId: z.string().min(1),
   repoUrl: z.string().min(1).max(400),
   report: ReconReport,
+  // The injectable paths recon OBSERVED in the repo tree (`ownedInjectionPaths`). The
+  // config-injection step reads it to leave a file the repository already owns alone;
+  // it is bounded by the injectable path set, so the state stays small. Defaults to
+  // empty so a state signed before this field still verifies.
+  existingPaths: z.array(z.string().min(1).max(400)).max(16).default([]),
 }).strict();
 
 const StatePayload = z.discriminatedUnion("kind", [InterviewState, ReconState]);
@@ -69,7 +74,13 @@ export class OnboardingStateSigner {
     });
   }
 
-  async signRecon(input: { orgId: string; projectId: string; repoUrl: string; report: unknown }): Promise<string> {
+  async signRecon(input: {
+    orgId: string;
+    projectId: string;
+    repoUrl: string;
+    report: unknown;
+    existingPaths?: ReadonlyArray<string>;
+  }): Promise<string> {
     const now = this.now();
     return this.sign({
       version: STATE_VERSION,
@@ -78,6 +89,7 @@ export class OnboardingStateSigner {
       projectId: input.projectId,
       repoUrl: input.repoUrl,
       report: ReconReport.parse(input.report),
+      existingPaths: [...(input.existingPaths ?? [])],
       issuedAt: now,
       expiresAt: now + STATE_TTL_MS,
     });

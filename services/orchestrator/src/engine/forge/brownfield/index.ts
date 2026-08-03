@@ -11,7 +11,9 @@ export { runRecon, type ReconEngineDeps, type RunReconResult } from "./recon.js"
 export {
   proposeConfigFiles,
   openConfigInjectionPr,
+  ownedInjectionPaths,
   mergeFileContent,
+  CONFIG_INJECTION_PATHS,
   type FileMergeStrategy,
   type ProposedFile,
   type ProposeFilesInput,

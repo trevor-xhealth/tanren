@@ -15,19 +15,26 @@
 // Both are expressed through ONE mechanism: the per-file merge strategy that rides on the
 // proposal (`ProposedFile.merge`) and is enforced at the write seam.
 
+import { Hono } from "hono";
 import { describe, expect, it } from "vitest";
+import type { ActorContext } from "../src/auth/schemas.js";
+import { InMemorySecretStore } from "../src/engine/contracts/secretStore.js";
 import {
   FetchConfigInjectionGitHub,
   openConfigInjectionPr,
   proposeConfigFiles,
+  type ReconIndex,
   type ReconReport,
 } from "../src/engine/forge/brownfield/index.js";
 import type { GitHubHttpClient, GitHubHttpRequest, GitHubHttpResponse } from "../src/engine/providers/github.js";
+import { createAuthMiddleware, type ActorContextEnv } from "../src/middleware/auth.js";
+import { createBrownfieldFullTrackRoutes } from "../src/routes/brownfield/fullTrack.js";
+import { RoutesPool } from "./helpers/routesPool.js";
 
 const REPO_URL = "https://github.com/acme/payments";
 
-// A REAL-LOOKING `.gitignore`: the rules that keep an install tree, a virtualenv, build
-// output and IDE noise out of the index. If injection replaces this file, the very next
+// A REAL-LOOKING `.gitignore`: the rules that keep an install tree, a venv, build output
+// and IDE noise out of the index. If injection replaces this file, the very next
 // `git add -A` commits all of it.
 const EXISTING_GITIGNORE = `node_modules/
 .venv/
@@ -250,4 +257,117 @@ describe("F-2 · a repo that already ships a justfile keeps it (the guard is wir
     // The gate DEFINITION is what makes onboarding work; it must still land.
     expect(http.puts).toContain(".tanren/ci.yml");
   });
+
+  it("threads the recon index through the routes so the stub is never even proposed", async () => {
+    const committed: string[] = [];
+    const app = await buildFullTrackHarness(committed, [
+      "README.md",
+      "pyproject.toml",
+      "justfile",
+      "CODEOWNERS",
+      ".gitignore",
+    ]);
+
+    const recon = await app.request("/orgs/org_acme/projects/project_1/recon", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ repoUrl: REPO_URL }),
+    });
+    expect(recon.status).toBe(200);
+    const { state } = (await recon.json()) as { state: string };
+
+    const injected = await app.request("/orgs/org_acme/projects/project_1/config-injection", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ state, posture: "strict", excludePaths: [] }),
+    });
+    expect(injected.status).toBe(201);
+    const body = (await injected.json()) as { files: Array<{ path: string }> };
+    const proposed = body.files.map((f) => f.path);
+
+    // The repo owns its lifecycle + review routing — neither is proposed or committed.
+    expect(proposed).not.toContain("justfile");
+    expect(committed).not.toContain("justfile");
+    expect(proposed).not.toContain("CODEOWNERS");
+    expect(committed).not.toContain("CODEOWNERS");
+    // The tanren-owned files still are; `.gitignore` too (it is appended, not replaced).
+    expect(proposed).toContain(".tanren/ci.yml");
+    expect(proposed).toContain(".tanren/PROJECT.md");
+    expect(proposed).toContain(".gitignore");
+  });
 });
+
+const actor: ActorContext = {
+  userId: "user_alice",
+  orgId: "org_acme",
+  projectId: null,
+  scopes: ["org:member", "org:admin", "platform:admin"],
+  source: "session",
+};
+
+/** The full-track routes over an in-memory pool, a fake repo reader + a recording forge. */
+async function buildFullTrackHarness(committed: string[], repoPaths: string[]): Promise<Hono<ActorContextEnv>> {
+  const pool = new RoutesPool();
+  pool.seedOrg({
+    id: "org_acme",
+    config: { version: 1, defaultCredentials: { github_token: "credential/github/org/org_acme/default" } },
+  });
+  pool.seedProject({ project_id: "project_1", org_id: "org_acme", repo_url: REPO_URL, default_branch: "main" });
+  const secrets = new InMemorySecretStore();
+  await secrets.put({ ref: "credential/github/org/org_acme/default", value: "ghp_test" });
+
+  const index: ReconIndex = {
+    repoUrl: REPO_URL,
+    filesIndexed: repoPaths.length,
+    files: repoPaths.map((path) => ({ path, size: 10, preview: "" })),
+  };
+
+  const app = new Hono<ActorContextEnv>();
+  app.use(
+    "*",
+    createAuthMiddleware({
+      store: {
+        async findApiTokenByRaw() {},
+        async loadSession() {},
+        async resolveActorContext() {
+          return actor;
+        },
+      } as never,
+      localDevActor: actor,
+    }),
+  );
+  app.route(
+    "/orgs",
+    createBrownfieldFullTrackRoutes({
+      pool: pool.asPgPool(),
+      secrets,
+      githubHttp: {
+        async request() {
+          return { status: 404, body: undefined };
+        },
+      },
+      reconAnswererFactory: () => ({
+        async read() {
+          return SAMPLE_REPORT;
+        },
+      }),
+      repoReaderFor: () => ({
+        async index() {
+          return index;
+        },
+      }),
+      configInjectionGithubFor: () => ({
+        async openConfigInjectionPr(input) {
+          committed.push(...input.files.map((f) => f.path));
+          return {
+            number: 12,
+            url: `${REPO_URL}/pull/12`,
+            branch: input.headBranch,
+            filesCommitted: input.files.map((f) => f.path),
+          };
+        },
+      }),
+    }),
+  );
+  return app;
+}
