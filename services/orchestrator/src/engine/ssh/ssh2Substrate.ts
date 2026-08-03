@@ -10,6 +10,7 @@ import type {
   CommandSubstrate,
 } from "../contracts/commandSubstrate.js";
 import { defineFailure } from "../failure.js";
+import { RecentOutputWindow, RetainedOutput } from "./boundedOutput.js";
 import { buildSshExecCommand } from "./command.js";
 import { hostKeyFingerprintMatches } from "./fingerprint.js";
 import { appendWorkSignature, distinctRecentOutput, isWedgedNonAdvancing, workSignature } from "./watchdogProgress.js";
@@ -37,8 +38,18 @@ export interface SshCommandSubstrateOptions {
 }
 
 interface RunState {
-  stdout: string;
-  stderr: string;
+  // Captured output under the command's declared retention policy (F-9). `"full"` (the
+  // default) is byte-for-byte the old `+=` accumulation; `"bounded"` retains a head + tail
+  // and reports the elision out of band. See ssh/boundedOutput.ts for why this is opt-in.
+  stdout: RetainedOutput;
+  stderr: RetainedOutput;
+  // The trailing window of output the WATCHDOG fingerprints, drained on every probe tick.
+  // It is a SEPARATE, bounded buffer rather than a cursor into the retained streams: the
+  // old code re-concatenated `state.stdout + state.stderr` on EVERY tick (an O(total) copy
+  // of a possibly hundreds-of-MB buffer every cadence) and indexed it by a char offset,
+  // which additionally mis-tracks because stdout growth shifts the stderr region. Draining
+  // a window is O(new output) and is unaffected by how much has been retained or elided.
+  recentOutput: RecentOutputWindow;
   exitCode: number | null;
   signal?: string;
   settled: boolean;
@@ -55,10 +66,6 @@ interface RunState {
   lastActivityAt: number;
   lastProbeTickAt?: number;
   workSignatures: string[];
-  // How many chars of the combined stdout+stderr the LAST work-signature snapshot consumed, so
-  // each tick fingerprints only the NEW distinct output since (rate-independent — see
-  // distinctRecentOutput). Advances every tick the snapshot is taken.
-  lastSnapshotOutputLen: number;
 }
 
 export class SshCommandSubstrate implements CommandSubstrate {
@@ -99,14 +106,18 @@ export class SshCommandSubstrate implements CommandSubstrate {
   ): Promise<CommandResult> {
     return await new Promise<CommandResult>((resolve) => {
       const client = this.clientFactory();
+      // Retention DEFAULTS to "full": the ~19 consumers that reconstruct a whole file or
+      // parse/count across the whole stream must never be truncated implicitly. A call
+      // site opts into "bounded" when it can show only a tail is read.
+      const retention = command.outputRetention ?? "full";
       const state: RunState = {
-        stdout: "",
-        stderr: "",
+        stdout: new RetainedOutput(retention),
+        stderr: new RetainedOutput(retention),
+        recentOutput: new RecentOutputWindow(),
         exitCode: null,
         settled: false,
         lastActivityAt: Date.now(),
         workSignatures: [],
-        lastSnapshotOutputLen: 0,
       };
       let hostKeyFailure: string | undefined;
 
@@ -137,8 +148,7 @@ export class SshCommandSubstrate implements CommandSubstrate {
         settle(
           {
             ...this.failureResult(target, message),
-            stdout: state.stdout,
-            stderr: state.stderr,
+            ...capturedOutput(state),
           },
           "destroy",
         );
@@ -157,8 +167,7 @@ export class SshCommandSubstrate implements CommandSubstrate {
             () => {
               settle({
                 exitCode: state.exitCode,
-                stdout: state.stdout,
-                stderr: state.stderr,
+                ...capturedOutput(state),
                 signal: state.signal,
               });
             },
@@ -240,19 +249,25 @@ export class SshCommandSubstrate implements CommandSubstrate {
     onError: (error: unknown) => void,
     onClose: () => void,
   ): void {
-    // Accumulate output into the state (the watchdog folds the recent output TAIL into its
-    // WORK SIGNATURE each tick — NEW distinct output advances the signature = progress). Stamp
-    // `lastActivityAt` as the last-output time: diagnostic evidence for `quietForMs`, not the
-    // progress trigger (which is the work-signature advancement read in tickWatchdog).
+    // Fold output into TWO bounded sinks (F-9): the RETAINED capture the caller receives
+    // (head+tail under `"bounded"`, everything under the `"full"` default) and the small
+    // RECENT window the watchdog drains each tick. Neither is the unbounded `+=` this
+    // replaced. Stamp `lastActivityAt` as the last-output time: diagnostic evidence for
+    // `quietForMs`, not the progress trigger (which is the work-signature advancement read
+    // in tickWatchdog).
     const markActivity = (): void => {
       state.lastActivityAt = Date.now();
     };
     stream.on("data", (chunk: Buffer) => {
-      state.stdout += chunk.toString("utf8");
+      const text = chunk.toString("utf8");
+      state.stdout.append(text);
+      state.recentOutput.append(text);
       markActivity();
     });
     stream.stderr.on("data", (chunk: Buffer) => {
-      state.stderr += chunk.toString("utf8");
+      const text = chunk.toString("utf8");
+      state.stderr.append(text);
+      state.recentOutput.append(text);
       markActivity();
     });
     stream.on("error", onError);
@@ -330,8 +345,11 @@ export class SshCommandSubstrate implements CommandSubstrate {
         return;
       }
     }
-    const recent = distinctRecentOutput(state.stdout + state.stderr, state.lastSnapshotOutputLen);
-    state.lastSnapshotOutputLen = recent.length;
+    // DRAIN the bounded recent-output window (F-9): everything that arrived since the last
+    // tick, deduped to its DISTINCT lines (rate-independent — see distinctRecentOutput).
+    // `priorLen` is 0 because the window already contains only the increment — no
+    // re-concatenation of the whole retained stream, and no char cursor to keep in sync.
+    const recent = distinctRecentOutput(state.recentOutput.drain(), 0);
     const signature = workSignature(recent.content, workspaceSig);
     const priorSignature = state.workSignatures.at(-1);
     state.workSignatures = appendWorkSignature(state.workSignatures, signature);
@@ -394,8 +412,7 @@ export class SshCommandSubstrate implements CommandSubstrate {
     if (onQuiet === "surface") {
       resolve({
         exitCode: null,
-        stdout: state.stdout,
-        stderr: state.stderr,
+        ...capturedOutput(state),
         signal: state.signal,
         stalled: true,
         quietForMs,
@@ -404,8 +421,7 @@ export class SshCommandSubstrate implements CommandSubstrate {
     }
     resolve({
       ...this.failureResult(target, "SSH command showed no sign of life (dead/zombied/deadlocked) and was terminated"),
-      stdout: state.stdout,
-      stderr: state.stderr,
+      ...capturedOutput(state),
       stalled: true,
       quietForMs,
     });
@@ -419,6 +435,22 @@ export class SshCommandSubstrate implements CommandSubstrate {
       failure: defineFailure({ kind: "ssh_failed", target: formatTarget(target), message }),
     };
   }
+}
+
+// The captured-output fields of a result, materialized from the two retention buffers.
+// `stdoutElidedChars`/`stderrElidedChars` are omitted when nothing was dropped, so a
+// `"full"` result is byte-for-byte and field-for-field what it always was.
+function capturedOutput(
+  state: RunState,
+): Pick<CommandResult, "stdout" | "stderr" | "stdoutElidedChars" | "stderrElidedChars"> {
+  const stdoutElided = state.stdout.elidedChars;
+  const stderrElided = state.stderr.elidedChars;
+  return {
+    stdout: state.stdout.text(),
+    stderr: state.stderr.text(),
+    ...(stdoutElided > 0 ? { stdoutElidedChars: stdoutElided } : {}),
+    ...(stderrElided > 0 ? { stderrElidedChars: stderrElided } : {}),
+  };
 }
 
 function formatTarget(target: SshRunnerHandle): string {

@@ -252,7 +252,20 @@ async function executeStep(
   step: CiStep,
   parsedJunitReports: Map<string, JunitReport>,
 ): Promise<StepExecution> {
+  const evidenceContract = evidenceForStep(step);
+  // OUTPUT RETENTION (F-9). A gate step is the single largest stream in the system — a
+  // full `just ci` on a 12k-file monorepo emits hundreds of MB, and the orchestrator used
+  // to hold every byte of it in one JS string per in-flight step. Its ONLY output consumer
+  // is `tailOf(combinedOutput(result))`, a 4 000-char tail, so a head+tail retention loses
+  // nothing it reads — WITH ONE EXCEPTION: a `stdout-count` evidence contract COUNTS regex
+  // matches across the WHOLE stdout (`harvestStdoutCount`), and an elided middle would
+  // undercount and fail a passing step as `evidence_insufficient`. So the step opts into
+  // bounded retention only when its evidence contract does not read the whole stream.
+  // (junit / artifact evidence is harvested by a SEPARATE `cat` over SSH, which keeps its
+  // own full retention — the report is read back as a file, not from this stream.)
+  const needsWholeStdout = evidenceContract?.kind === "stdout-count";
   const result = await input.ssh.run(input.target, {
+    outputRetention: needsWholeStdout ? "full" : "bounded",
     // PROJECT-COMMAND path: mise-activate so a bare `node`/`pnpm`/etc in the project's
     // gate command resolves to its `mise.toml`-declared toolchain (a no-op when the
     // project declared none), THEN prepend the app-env prelude. Both are prepended to
@@ -271,7 +284,6 @@ async function executeStep(
     }),
   });
   const exitOk = result.failure === undefined && result.stalled !== true && result.exitCode === 0;
-  const evidenceContract = evidenceForStep(step);
   let evidenceVerdict: EvidenceVerdict | undefined;
   if (exitOk && evidenceContract !== undefined) {
     const harvest = await harvestStepEvidence(

@@ -28,10 +28,31 @@ import type { RunnerHandle } from "./allocator.js";
 // SOLE hang detector. There is NO wall-clock kill of the running command: the only
 // time bound in this contract is `connectTimeoutMs`, the legitimate TCP/SSH
 // HANDSHAKE bound (a dead handshake has no work to lose).
+// How much of a command's captured output the substrate RETAINS IN MEMORY. This is a
+// memory-residency policy, NOT a safety budget — nothing here bounds, kills, or gives up
+// on the running command (it still runs UNBOUNDED under the `watchdog`).
+//
+//   - `"full"`   (DEFAULT) — every byte, exactly as before. Required by the ~19 consumers
+//                that reconstruct a whole file read back over SSH, parse the whole stream,
+//                or COUNT regex matches across all of it. Several of those hard-throw on a
+//                short/malformed stream, so completeness is load-bearing and must never be
+//                taken away implicitly.
+//   - `"bounded"` — retain a head + tail only (see engine/ssh/boundedOutput.ts). An
+//                OPT-IN a call site may declare only when it can show the whole stream is
+//                not load-bearing — e.g. a gate step whose sole output consumer is a
+//                4 000-char `tailOf(...)`. The elision is reported OUT OF BAND on the
+//                result; the retained body carries only real bytes, cut on line
+//                boundaries, with no synthetic marker a parser could choke on.
+export type OutputRetention = "full" | "bounded";
+
 export interface RunnerCommand {
   command: string;
   cwd?: string;
   stdin?: string;
+  // Memory-residency policy for this command's captured output. Defaults to `"full"`.
+  // See {@link OutputRetention} — declaring `"bounded"` is a per-call-site assertion that
+  // no consumer of THIS command's result needs the complete stream.
+  outputRetention?: OutputRetention;
   // The legitimate connect-ESTABLISHMENT bound: how long to wait for the SSH
   // transport to come up (TCP connect + handshake/auth) before giving up on a
   // connection that never established. This is NOT a kill budget on the running
@@ -161,6 +182,15 @@ export interface CommandResult {
   stalled?: boolean;
   quietForMs?: number;
   failure?: Failure;
+  // OUT-OF-BAND elision accounting (F-9). Present and > 0 only when the command declared
+  // `outputRetention: "bounded"` AND the stream exceeded the retained head + tail. The
+  // count is deliberately NOT a marker inside the body: an injected `[… elided …]` line
+  // would be parsed as a JSONL event, a `git log` record, or a NUL-framed path by real
+  // consumers, and would be counted by a `matchAll` evidence check. A consumer that needs
+  // to know its view is partial reads THIS, and `stdout.length + stdoutElidedChars` is the
+  // exact number of chars the command emitted.
+  stdoutElidedChars?: number;
+  stderrElidedChars?: number;
 }
 
 // THE seam. `run()` executes one command in the runner the handle addresses.
