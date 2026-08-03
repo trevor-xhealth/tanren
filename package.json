@@ -18,6 +18,7 @@
     "check:schema-drift": "bash scripts/check-schema-drift.sh",
     "check:state-drift": "node scripts/generate-state-checks.mjs --check",
     "check:event-drift": "node scripts/generate-event-type-seed.mjs --check",
+    "check:event-migration-drift": "node scripts/check-event-type-migrations.mjs",
     "check:env-reads": "node scripts/lint/env-read-whitelist.mjs",
     "check:knip": "knip",
     "check:mutation": "stryker run",

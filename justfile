@@ -48,6 +48,14 @@ state-drift:
 event-drift:
   corepack pnpm run check:event-drift
 
+# The seam `event-drift` does NOT cover: it proves the SEED FILE mirrors the code
+# vocabulary, never that a MIGRATION inserts those rows. A declared-but-unmigrated
+# name passes every gate and then halts the first run that emits it on the
+# events.event_type FK. Static + offline, so it belongs here in fast-check; the
+# live counterpart is `smoke-event-type-catalog`.
+event-migration-drift:
+  corepack pnpm run check:event-migration-drift
+
 answerer-schema-drift:
   corepack pnpm run check:answerer-schema-drift
 
@@ -125,7 +133,7 @@ spelling:
 typecheck:
   corepack pnpm run typecheck
 
-fast-check: format-check lint types-lint architecture no-pg-as-date schema-drift state-drift event-drift answerer-schema-drift contract-schema-drift dashboard-types-drift integration-schema-bundle-drift rv-read-compat integration-read-compat knip spelling typecheck test compose-config
+fast-check: format-check lint types-lint architecture no-pg-as-date schema-drift state-drift event-drift event-migration-drift answerer-schema-drift contract-schema-drift dashboard-types-drift integration-schema-bundle-drift rv-read-compat integration-read-compat knip spelling typecheck test compose-config
 
 test:
   corepack pnpm run test
@@ -174,7 +182,7 @@ build:
 compose-config:
   corepack pnpm run compose:config
 
-ci: format-check lint types-lint architecture no-pg-as-date schema-drift state-drift event-drift answerer-schema-drift contract-schema-drift dashboard-types-drift integration-schema-bundle-drift rv-read-compat integration-read-compat knip spelling typecheck test build compose-config
+ci: format-check lint types-lint architecture no-pg-as-date schema-drift state-drift event-drift event-migration-drift answerer-schema-drift contract-schema-drift dashboard-types-drift integration-schema-bundle-drift rv-read-compat integration-read-compat knip spelling typecheck test build compose-config
 
 compose-build:
   docker compose -f compose.dev.yml build orchestrator worker allocator dashboard runner
@@ -1277,7 +1285,17 @@ smoke: \
   smoke-rls-post-merge-behavior-verdict \
   smoke-rls-verification-reads \
   smoke-rls-proof-dashboard \
-  smoke-rls-catalog-import
+  smoke-rls-catalog-import \
+  smoke-event-type-catalog
+
+# The LIVE half of the event-type migration guard: applies db/migrations to a real
+# Postgres and compares the actual `event_types` table to the code vocabulary, so a
+# declared-but-unmigrated name cannot reach production and halt runs on the
+# events.event_type FK. Immune to the INSERT-shape parsing the static
+# `just event-migration-drift` does — and cross-checks that parser against the
+# real table so it cannot be silently wrong.
+smoke-event-type-catalog:
+  DATABASE_URL="${DATABASE_URL:-postgres://tanren:tanren@localhost:5432/tanren}" TANREN_RLS_DB_TEST=1 corepack pnpm exec vitest run --no-file-parallelism services/orchestrator/tests/eventTypeCatalog.integration.test.ts
 
 # tanren.behavior.v0 / tanren.persona.v0 catalog import — a synthetic catalog
 # imports with identity, persona links and cross-references intact; an unresolvable
