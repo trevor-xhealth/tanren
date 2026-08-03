@@ -149,14 +149,45 @@ export interface ToolchainDetection {
   readonly unresolved: readonly UnresolvedDeclaration[];
 }
 
+/**
+ * WHY A KIND, AND WHY EXACTLY TWO. "Tanren read this and could not honor it" covers two
+ * materially different situations, and collapsing them is what let an unhonored VERSION
+ * proceed silently:
+ *
+ *   - `untranslatable-version` — Tanren KNOWS the tool and CAN provision it, but the
+ *     version the repo wrote is an alias it must not translate (`lts/iron`,
+ *     `channel = "stable"`, `pnpm@`). The repo pinned a version FOR A REASON and Tanren
+ *     cannot deliver it; the runner almost certainly has SOME copy of that tool, so
+ *     proceeding means gating against a version nobody asked for. This is the case the
+ *     enforcement halts on (./toolchainEnforcement.ts).
+ *   - `unresolvable-declaration` — Tanren could not get as far as a provisionable tool at
+ *     all: an unparseable manifest, a malformed field, a tool name with no binary mapping
+ *     (`frobpm`). There is no version to be wrong ABOUT — Tanren cannot claim the run is
+ *     on the wrong version of something it never identified — and these are ordinarily
+ *     WRITER-fixable (a typo'd `package.json` mid-run). They stay a loud notice, and if
+ *     the bootstrap actually needed that tool the missing-binary classifier still halts.
+ *
+ * That asymmetry is the whole tolerance, stated once and kept narrow.
+ */
+export type UnresolvedDeclarationKind = "untranslatable-version" | "unresolvable-declaration";
+
 export interface UnresolvedDeclaration {
   readonly path: string;
   readonly reason: string;
+  readonly kind: UnresolvedDeclarationKind;
   /** The tool the declaration named, when Tanren got far enough to know it. The
    * infra-fault classifier matches a missing binary against this, so a tool the repo
    * DID declare and Tanren could NOT honor halts as infrastructure rather than being
    * handed to a writer who has no way to install it. */
   readonly tool?: string;
+}
+
+/** The kind for a declaration whose VERSION could not be translated: an untranslatable
+ * version iff Tanren could otherwise have provisioned that tool (it has a binary), else
+ * an unresolvable declaration — Tanren never claims a version is wrong for a tool it
+ * could not have put on PATH in the first place. */
+function versionKind(tool: string): UnresolvedDeclarationKind {
+  return toolBinary(tool) === undefined ? "unresolvable-declaration" : "untranslatable-version";
 }
 
 interface Candidate {
@@ -200,6 +231,7 @@ export function detectToolchainRequirements(files: readonly ToolchainDeclaration
       unresolved.push({
         path: candidate.declaredIn,
         reason: `declares tool "${candidate.tool}", which Tanren has no binary mapping for`,
+        kind: "unresolvable-declaration",
         tool: candidate.tool,
       });
       continue;
@@ -244,7 +276,7 @@ function readPackageManager(file: ToolchainDeclarationFile, unresolved: Unresolv
   try {
     parsed = JSON.parse(file.contents);
   } catch {
-    unresolved.push({ path: file.path, reason: "is not parseable JSON" });
+    unresolved.push({ path: file.path, reason: "is not parseable JSON", kind: "unresolvable-declaration" });
     return [];
   }
   const field =
@@ -254,13 +286,22 @@ function readPackageManager(file: ToolchainDeclarationFile, unresolved: Unresolv
   if (typeof field !== "string" || field.trim() === "") return [];
   const at = field.lastIndexOf("@");
   if (at <= 0) {
-    unresolved.push({ path: file.path, reason: `packageManager "${field}" is not "<name>@<version>"` });
+    unresolved.push({
+      path: file.path,
+      reason: `packageManager "${field}" is not "<name>@<version>"`,
+      kind: "unresolvable-declaration",
+    });
     return [];
   }
   const tool = resolveAlias(field.slice(0, at).trim());
   const spec = normalizeSpec(field.slice(at + 1).split("+")[0] ?? "");
   if (spec === undefined) {
-    unresolved.push({ path: file.path, reason: `packageManager "${field}" carries no usable version`, tool });
+    unresolved.push({
+      path: file.path,
+      reason: `packageManager "${field}" carries no usable version`,
+      kind: versionKind(tool),
+      tool,
+    });
     return [];
   }
   return [{ tool, spec, declaredIn: file.path, versionDeclared: true }];
@@ -279,6 +320,7 @@ function readToolVersions(file: ToolchainDeclarationFile, unresolved: Unresolved
       unresolved.push({
         path: file.path,
         reason: `version "${rawSpec}" for "${rawTool}" is not a plain version`,
+        kind: versionKind(resolveAlias(rawTool)),
         tool: resolveAlias(rawTool),
       });
       continue;
@@ -309,7 +351,12 @@ function readRustToolchainToml(file: ToolchainDeclarationFile, unresolved: Unres
   const raw = line.replace(/^channel\s*=\s*/u, "").replaceAll(/^["']|["']$/gu, "");
   const spec = normalizeSpec(raw);
   if (spec === undefined) {
-    unresolved.push({ path: file.path, reason: `channel "${raw}" is not a version mise can provision`, tool: "rust" });
+    unresolved.push({
+      path: file.path,
+      reason: `channel "${raw}" is not a version mise can provision`,
+      kind: versionKind("rust"),
+      tool: "rust",
+    });
     return [];
   }
   return [{ tool: "rust", spec, declaredIn: file.path, versionDeclared: true }];
@@ -322,7 +369,12 @@ function pinned(tool: string, file: ToolchainDeclarationFile, unresolved: Unreso
   if (raw === undefined) return [];
   const spec = normalizeSpec(raw);
   if (spec === undefined) {
-    unresolved.push({ path: file.path, reason: `"${raw}" is not a version mise can provision`, tool });
+    unresolved.push({
+      path: file.path,
+      reason: `"${raw}" is not a version mise can provision`,
+      kind: versionKind(tool),
+      tool,
+    });
     return [];
   }
   return [{ tool, spec, declaredIn: file.path, versionDeclared: true }];

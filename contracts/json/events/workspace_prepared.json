@@ -11,6 +11,37 @@
     "targetBranch": {
       "type": "string"
     },
+    "toolchain": {
+      "items": {
+        "additionalProperties": false,
+        "properties": {
+          "declared": {
+            "type": "string"
+          },
+          "declaredIn": {
+            "type": "string"
+          },
+          "resolved": {
+            "type": "string"
+          },
+          "tool": {
+            "type": "string"
+          },
+          "versionDeclared": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "tool",
+          "declared",
+          "resolved",
+          "declaredIn",
+          "versionDeclared"
+        ],
+        "type": "object"
+      },
+      "type": "array"
+    },
     "workspacePath": {
       "type": "string"
     }

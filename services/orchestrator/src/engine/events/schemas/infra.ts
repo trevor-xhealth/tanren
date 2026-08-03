@@ -122,6 +122,24 @@ export const WorkspacePreparedPayload = z
     workspacePath: z.string(),
     repoUrl: z.string().optional(),
     targetBranch: z.string().optional(),
+    // The toolchain ACTUALLY in effect for the run: per declared tool, the concrete
+    // version the runner resolved (`resolved`) against what the repository declared
+    // (`declared`, in `declaredIn`). Recorded here because the provision's console line
+    // scrolls past, and "the gate ran on the version the repo asked for" has to be
+    // checkable after the fact. Absent when the repo declares no toolchain.
+    toolchain: z
+      .array(
+        z
+          .object({
+            tool: z.string(),
+            declared: z.string(),
+            resolved: z.string(),
+            declaredIn: z.string(),
+            versionDeclared: z.boolean(),
+          })
+          .strict(),
+      )
+      .optional(),
   })
   .strict();
 

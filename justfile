@@ -642,6 +642,18 @@ smoke-connectivity:
 smoke-ssh-integration:
   runner_port="${TANREN_RUNNER_SSH_HOST_PORT:-$((2222 + ${TANREN_PORT_OFFSET:-0}))}"; fingerprint="$(ssh-keyscan -p "$runner_port" -t ed25519 localhost 2>/dev/null | ssh-keygen -lf - -E sha256 | awk 'NR == 1 { print $2 }')"; test -n "$fingerprint"; TANREN_SSH_INTEGRATION=1 TANREN_SSH_KEY_PATH="$TANREN_RUNTIME_DIR/tanren_runner_key" TANREN_SSH_HOST=127.0.0.1 TANREN_SSH_PORT="$runner_port" TANREN_SSH_USER=tanren TANREN_SSH_HOST_FINGERPRINT="$fingerprint" TANREN_SSH_HOST_KEY_ALGORITHMS=ssh-ed25519 corepack pnpm exec vitest run services/orchestrator/tests/ssh.integration.test.ts
 
+# TOOLCHAIN ENFORCEMENT container proof (environment-management.md §3 Layer 1/2). The
+# unit suite pins the provision command STRINGS; this is the only place their EFFECT on a
+# real runner is proven — which is where the defect lived: the strings were right, the
+# exit code was 0, and the repo got gated on a version it never declared. It drives the
+# REAL SshCommandSubstrate against the SAME `runner` container `smoke-ssh-integration`
+# uses (already built + healthy by then), so it costs one SSH session and NO image build.
+#
+# NOT OPT-IN, and deliberately so: this test's header used to claim "the container run is
+# the proof" while nothing ran it, which is exactly the rot this recipe exists to stop.
+smoke-toolchain-container:
+  runner_port="${TANREN_RUNNER_SSH_HOST_PORT:-$((2222 + ${TANREN_PORT_OFFSET:-0}))}"; fingerprint="$(ssh-keyscan -p "$runner_port" -t ed25519 localhost 2>/dev/null | ssh-keygen -lf - -E sha256 | awk 'NR == 1 { print $2 }')"; test -n "$fingerprint"; TANREN_TOOLCHAIN_CONTAINER=1 TANREN_SSH_KEY_PATH="$TANREN_RUNTIME_DIR/tanren_runner_key" TANREN_SSH_HOST=127.0.0.1 TANREN_SSH_PORT="$runner_port" TANREN_SSH_USER=tanren TANREN_SSH_HOST_FINGERPRINT="$fingerprint" TANREN_SSH_HOST_KEY_ALGORITHMS=ssh-ed25519 corepack pnpm exec vitest run services/orchestrator/tests/toolchainContainer.integration.test.ts
+
 live-codex-writer:
   test -n "${TANREN_CODEX_AUTH_JSON_FILE:-}"
   fingerprint="$(ssh-keyscan -p 2222 -t ed25519 localhost 2>/dev/null | ssh-keygen -lf - -E sha256 | awk 'NR == 1 { print $2 }')"; test -n "$fingerprint"; TANREN_CODEX_LIVE=1 TANREN_CODEX_AUTH_JSON_FILE="${TANREN_CODEX_AUTH_JSON_FILE}" TANREN_SSH_KEY_PATH="$TANREN_RUNTIME_DIR/tanren_runner_key" TANREN_SSH_HOST=127.0.0.1 TANREN_SSH_PORT=2222 TANREN_SSH_USER=tanren TANREN_SSH_HOST_FINGERPRINT="$fingerprint" TANREN_SSH_HOST_KEY_ALGORITHMS=ssh-ed25519 corepack pnpm exec vitest run services/orchestrator/tests/codexWriter.live.test.ts
@@ -1200,6 +1212,7 @@ smoke: \
   wait-for-stack \
   smoke-connectivity \
   smoke-ssh-integration \
+  smoke-toolchain-container \
   smoke-plane-split-worker \
   smoke-plane-split-worker-remote-writes \
   smoke-plane-split-p3 \

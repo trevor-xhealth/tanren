@@ -50,8 +50,9 @@ import {
   resolveRunAdaptersWithBudgetPreflight,
   simulatedReviewSeam,
 } from "./plannerRunAdapters.js";
-import { prepareRunWorkspace, type BootstrapStepInput, type CommitBootstrapStepInput } from "./plannerRunWorkspace.js";
-import type { ProvisionMiseToolchainInput } from "../workspace/toolchainProvision.js";
+import { prepareRunWorkspace, workspacePreparedPayload } from "./plannerRunWorkspace.js";
+import type { BootstrapStepInput, CommitBootstrapStepInput } from "./plannerRunWorkspace.js";
+import type { ProvisionMiseToolchainInput, ToolchainProvisionOutcome } from "../workspace/toolchainProvision.js";
 import type {
   AncestorPhaseReader,
   BootstrapStackHeadShaWriteBack,
@@ -192,7 +193,9 @@ export interface RunPlannerLoopInput {
   // Test seam: no-op / scripted failure for `bootstrapWorkspace` over SSH.
   runBootstrap?: (input: BootstrapStepInput) => Promise<void>;
   // Test seam: `mise trust && mise install` before bootstrap (env-management §3).
-  provisionMise?: (input: ProvisionMiseToolchainInput) => Promise<void>;
+  // Production returns the provision outcome (what resolved, recorded on `workspace.prepared`);
+  // a seam may return nothing, and the run then records no toolchain, as an undeclared repo does.
+  provisionMise?: (input: ProvisionMiseToolchainInput) => Promise<ToolchainProvisionOutcome | void>;
   // Test seam: synthetic post-bootstrap commit (the writer's diff base).
   commitBootstrap?: (input: CommitBootstrapStepInput) => Promise<string>;
   // Test seam: gate for per_iteration (fast) + pre_audit (slow); default reads tanren-ci.yml.
@@ -297,13 +300,10 @@ export async function runPlannerLoopWorkflow(rawInput: RunPlannerLoopInput): Pro
     // Clone (single-ref OR — WS-A PR-4, flag-gated — the jj-local ancestor-stack bootstrap) +
     // bootstrap-install + commit + materialize contract files. `baseSha` = answerer review base;
     // `cloneHeadSha` = writer's replay base; `bootstrappedBaseRevision` set ONLY on jj-local.
+    const prepared = await prepareRunWorkspace(input, allocation.target, workspacePath);
     const { cloneHeadSha, bootstrapSha, baseSha, bootstrappedBaseRevision, prepBootstrapDeferred, pushIdentity } =
-      await prepareRunWorkspace(input, allocation.target, workspacePath);
-    await appendEvent("workspace.prepared", {
-      workspacePath,
-      repoUrl: context.repoUrl,
-      targetBranch: context.targetBranch,
-    });
+      prepared;
+    await appendEvent("workspace.prepared", workspacePreparedPayload(workspacePath, context, prepared));
     // SELF-HEAL (apex v35): emit `workspace.bootstrap_deferred` when prep's
     // `just bootstrap` deps-install was deferred to the gate self-heal.
     await emitPrepBootstrapDeferred(appendEvent, workspacePath, prepBootstrapDeferred);

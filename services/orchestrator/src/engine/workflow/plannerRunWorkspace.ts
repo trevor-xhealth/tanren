@@ -22,6 +22,7 @@ import {
   seedWorkspaceLocalIgnore,
   WorkspaceBootstrapError,
   type ProvisionMiseToolchainInput,
+  type ToolchainResolution,
 } from "../workspace/index.js";
 import { gitAuthedCommand, gitTokenAuthPrelude } from "../workspace/githubPush.js";
 import { buildActivityWatchdog } from "../ssh/activityWatchdog.js";
@@ -89,6 +90,37 @@ export interface PreparedRunWorkspace {
   // spec — see the prep-bootstrap block + the `workspace.bootstrap_deferred` schema. Absent
   // ⇒ the prep bootstrap succeeded (or no-op). The caller emits the deferral event from this.
   prepBootstrapDeferred?: { command: string; exitCode: number | null; timedOut: boolean; outputTail: string };
+  // WHICH TOOLCHAIN VERSIONS ARE ACTUALLY IN EFFECT for this run: per declared tool, the
+  // concrete version the runner resolved, what the repo declared, and the file it declared
+  // it in. Surfaced so the caller can record it on `workspace.prepared` — the operator's
+  // durable answer to "which version ran vs which was declared". Absent when the repo
+  // declares nothing Tanren provisions, or on a test seam that returns no outcome.
+  toolchain?: readonly ToolchainResolution[];
+}
+
+/**
+ * The `workspace.prepared` payload for a prepared workspace.
+ *
+ * WHICH TOOLCHAIN ACTUALLY RAN. The provision announces the versions it put in effect on
+ * the runner's console, and that line scrolls past; this is the DURABLE record, anchored
+ * on the run, of the concrete version every declared tool resolved to and the file that
+ * declared it. It is what makes "the gate ran on the version the repo asked for" a claim
+ * an operator can check afterwards rather than one they have to take on faith. Omitted
+ * entirely when the repo declares no toolchain Tanren provisions — an absent field says
+ * "nothing was declared", which is not the same as "nothing was checked".
+ */
+export function workspacePreparedPayload(
+  workspacePath: string,
+  context: { repoUrl: string; targetBranch: string },
+  prepared: PreparedRunWorkspace,
+): { workspacePath: string; repoUrl: string; targetBranch: string; toolchain?: ToolchainResolution[] } {
+  const toolchain = prepared.toolchain ?? [];
+  return {
+    workspacePath,
+    repoUrl: context.repoUrl,
+    targetBranch: context.targetBranch,
+    ...(toolchain.length > 0 && { toolchain: [...toolchain] }),
+  };
 }
 
 // Clones the target branch + installs deps + commits the bootstrap state, and
@@ -142,7 +174,8 @@ export async function prepareRunWorkspace(
   // `provisionMise` overrides it.
   const provisionMise =
     input.provisionMise ?? ((stepInput: ProvisionMiseToolchainInput) => provisionMiseToolchain(stepInput));
-  await provisionMise({ ssh: input.ssh, target, workspacePath });
+  const provisionOutcome = await provisionMise({ ssh: input.ssh, target, workspacePath });
+  const toolchain = provisionOutcome === undefined ? undefined : provisionOutcome.resolutions;
   const runBootstrap =
     input.runBootstrap ?? ((stepInput: BootstrapStepInput) => bootstrapWorkspace(stepInput).then(() => {}));
   // Plane B: the building agent runs install/build under the
@@ -219,6 +252,8 @@ export async function prepareRunWorkspace(
     }),
     // apex v35: surface a deferred prep-bootstrap failure so the caller emits the event.
     ...(prepBootstrapDeferred !== undefined && { prepBootstrapDeferred }),
+    // The toolchain the provision actually put in effect, for `workspace.prepared`.
+    ...(toolchain !== undefined && { toolchain }),
     // MERGE-SAFETY (self-identity): surface the resolved pushing identity so the clean-PR
     // prep authors the composed PR-head commit as the bot login (attributable ⇒ not
     // flagged `<unknown>` external). Absent on the unauthenticated clone (never pushes).

@@ -117,20 +117,44 @@ describe("detectToolchainRequirements · what it REFUSES to guess", () => {
     const detection = detectToolchainRequirements([file(".nvmrc", "lts/iron\n")]);
     expect(detection.requirements).toEqual([]);
     expect(detection.unresolved).toEqual([
-      { path: ".nvmrc", reason: '"lts/iron" is not a version mise can provision', tool: "node" },
+      {
+        path: ".nvmrc",
+        reason: '"lts/iron" is not a version mise can provision',
+        // The KIND is what makes this fatal downstream: node is a tool Tanren CAN
+        // provision, so "could not honor the version" means the run would otherwise
+        // proceed on whatever node the image carries.
+        kind: "untranslatable-version",
+        tool: "node",
+      },
     ]);
+  });
+
+  it("separates a version it cannot translate from a declaration it cannot read at all", () => {
+    // A tool Tanren has no binary for is NOT an untranslatable VERSION: Tanren never
+    // identified anything it could have put on PATH, so it can make no claim about which
+    // version is in effect. Keeping these apart is the whole of the enforcement's
+    // tolerance — see toolchainEnforcement.ts.
+    const exotic = detectToolchainRequirements([file("package.json", '{"packageManager":"frobpm@3.2.1"}')]);
+    expect(exotic.unresolved[0]?.kind).toBe("unresolvable-declaration");
+    const alias = detectToolchainRequirements([file(".tool-versions", "nodejs lts/iron\n")]);
+    expect(alias.unresolved[0]?.kind).toBe("untranslatable-version");
+    const malformed = detectToolchainRequirements([file("package.json", '{"packageManager":"pnpm"}')]);
+    expect(malformed.unresolved[0]?.kind).toBe("unresolvable-declaration");
   });
 
   it("reports an unparseable package.json rather than reading it as no-toolchain", () => {
     const detection = detectToolchainRequirements([file("package.json", "{ this is not json")]);
     expect(detection.requirements).toEqual([]);
-    expect(detection.unresolved).toEqual([{ path: "package.json", reason: "is not parseable JSON" }]);
+    expect(detection.unresolved).toEqual([
+      { path: "package.json", reason: "is not parseable JSON", kind: "unresolvable-declaration" },
+    ]);
   });
 
   it("a rust `stable` channel is reported, never mapped to some concrete release", () => {
     const detection = detectToolchainRequirements([file("rust-toolchain.toml", '[toolchain]\nchannel = "stable"\n')]);
     expect(detection.requirements).toEqual([]);
     expect(detection.unresolved[0]?.reason).toContain('channel "stable"');
+    expect(detection.unresolved[0]?.kind).toBe("untranslatable-version");
   });
 
   it("a repo with no declaration at all yields nothing — and says nothing false", () => {
