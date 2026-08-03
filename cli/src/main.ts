@@ -151,6 +151,7 @@ Commands:
   spec create        Create a persisted spec contract
   spec run           Create a queued run from a persisted spec
   status <run_id>    Print persisted run state
+  catalog import     Import a tanren.behavior.v0 / tanren.persona.v0 catalogue
   dashboard          Print the dashboard URL
   version            Print CLI version
 

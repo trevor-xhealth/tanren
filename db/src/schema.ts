@@ -32,6 +32,7 @@ import { integrationNodes, integrationProofs } from "./schemaIntegrationNodes.js
 import { gateProofBundles, gateProofBundleSections } from "./schemaGateProofBundles.js";
 import { events } from "./schemaEvents.js";
 import { issueLoopEdges, issueLoops, sourceFindings } from "./schemaIssueLoops.js";
+import { behaviors, personas } from "./schemaProductEntities.js";
 export {
   enumCheck,
   integrationNodes,
@@ -48,6 +49,8 @@ export {
   specs,
   users,
   events,
+  behaviors,
+  personas,
 };
 export { runners } from "./schemaRunners.js";
 export { mergeEagerBeams } from "./schemaEagerBeams.js";
@@ -328,57 +331,9 @@ export const apiTokens = pgTable(
   (table) => [index("api_tokens_user_id").on(table.userId), uniqueIndex("api_tokens_hash_unique").on(table.tokenHash)],
 );
 
-// P2A-0018 product entities: personas, behaviors, milestones, spec links, and directed spec dependency edges.
-export const personas = pgTable(
-  "personas",
-  {
-    id: text("id").primaryKey(),
-    scope: text("scope").notNull(),
-    orgId: text("org_id")
-      .notNull()
-      .references(() => organizations.id),
-    projectId: text("project_id").references(() => projects.projectId),
-    name: text("name").notNull(),
-    description: text("description").notNull(),
-    metadata: jsonb("metadata")
-      .notNull()
-      .default(sql`'{}'::jsonb`),
-    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
-    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
-  },
-  (table) => [
-    check("personas_scope_check", sql`${table.scope} IN ('org','project')`),
-    check(
-      "personas_scope_project_check",
-      sql`(${table.scope} = 'org' AND ${table.projectId} IS NULL) OR (${table.scope} = 'project' AND ${table.projectId} IS NOT NULL)`,
-    ),
-    index("personas_org_id").on(table.orgId),
-    index("personas_project_id").on(table.projectId),
-  ],
-);
-
-export const behaviors = pgTable(
-  "behaviors",
-  {
-    id: text("id").primaryKey(),
-    personaId: text("persona_id")
-      .notNull()
-      .references(() => personas.id),
-    title: text("title").notNull(),
-    given: text("given").notNull(),
-    when: text("when").notNull(),
-    // eslint-disable-next-line unicorn/no-thenable
-    then: text("then").notNull(),
-    description: text("description"),
-    metadata: jsonb("metadata")
-      .notNull()
-      .default(sql`'{}'::jsonb`),
-    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
-    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
-  },
-  (table) => [index("behaviors_persona_id").on(table.personaId)],
-);
-
+// P2A-0018 product entities. `personas` and `behaviors` live in
+// ./schemaProductEntities.js (a pure move — see that file's header); milestones,
+// the spec links, and the directed spec dependency edges stay here.
 export const milestones = pgTable(
   "milestones",
   {
@@ -475,3 +430,9 @@ export { mergeTrainArtifacts } from "./schemaMergeTrainArtifacts.js";
 export { landGroupDeliveryLoops } from "./schemaLandGroupDeliveryLoops.js";
 export { designAdapterConformanceRuns } from "./schemaDesignAdapterConformance.js";
 export * from "./schemaDesignEcosystem.js";
+export {
+  catalogBehaviorPersonas,
+  catalogBehaviorRelations,
+  catalogBehaviors,
+  catalogPersonas,
+} from "./schemaCatalog.js";

@@ -3,6 +3,7 @@
 // 500-line architecture cap.
 
 import { behaviorsCreate, behaviorsGet, behaviorsList } from "./behaviors/index.js";
+import { catalogGet, catalogImport, catalogList } from "./catalog/index.js";
 import { credentialsCreate, credentialsDelete, credentialsGet, credentialsList } from "./credentials/index.js";
 import {
   cellsCreate,
@@ -47,6 +48,9 @@ const HANDLERS: Record<string, (rest: string[]) => Promise<void>> = {
   "behaviors list": behaviorsList,
   "behaviors create": behaviorsCreate,
   "behaviors get": behaviorsGet,
+  "catalog import": catalogImport,
+  "catalog list": catalogList,
+  "catalog get": catalogGet,
   "milestones list": milestonesList,
   "milestones create": milestonesCreate,
   "milestones get": milestonesGet,
