@@ -15,7 +15,10 @@ import {
   defaultRoutingAdapters,
   resolveRunAdaptersWithBudgetPreflight,
 } from "../src/engine/workflow/plannerRunAdapters.js";
-import { UnreachableBudgetCeilingError } from "../src/engine/workflow/budgetPreflight.js";
+import {
+  UnenforceableBudgetCeilingError,
+  UnreachableBudgetCeilingError,
+} from "../src/engine/workflow/budgetPreflight.js";
 import type { BudgetGate } from "../src/engine/contracts/dagWalker.js";
 import type { AppendEvent } from "../src/engine/workflow/subtaskLoop.js";
 import type { RoutingChainEntry } from "../src/engine/config/shared.js";
@@ -121,6 +124,16 @@ function preflightInput(routing: RoutingTable, ceilingUsd?: number): RunPlannerL
 }
 const noopAppend: AppendEvent = async () => {};
 
+// A real recording sink (no spies — this repo's `no-mock-only-tests` lint rejects
+// assertions that only check a spy was called, and the allowlist is empty).
+function recorder(): { events: Array<{ eventType: string; payload: unknown }>; append: AppendEvent } {
+  const events: Array<{ eventType: string; payload: unknown }> = [];
+  const append = (async (eventType: string, payload: unknown) => {
+    events.push({ eventType, payload });
+  }) as AppendEvent;
+  return { events, append };
+}
+
 describe("resolveRunAdaptersWithBudgetPreflight — codex-only usage probe gating", () => {
   it("fails closed for a NON-codex (claude) subscription default with a ceiling — no codex probe is built", async () => {
     const routing = routingAll("claude", "credential/claude/org/o1/default");
@@ -150,5 +163,60 @@ describe("resolveRunAdaptersWithBudgetPreflight — codex-only usage probe gatin
     };
     const { usageProbe } = await resolveRunAdaptersWithBudgetPreflight(preflightInput(mixed), ctx, noopAppend);
     expect(usageProbe).toBeDefined();
+  });
+});
+
+// THE PRODUCTION WIRING of the BUDGET-SAFETY meterability refusal. `budgetPreflight.ts`
+// proves the refusal in isolation; these prove it is actually REACHED — the run-setup
+// path builds the adapters, reads the WRITER's (cli × credential) route off the real
+// routing table, and puts it through `runBudgetCeilingPreflight`. Without this, the
+// refusal is proven only for a function nothing proves is called (exactly the
+// wired-to-nothing shape `fix/brownfield-config-injection-safety` exists to fix).
+// Asserted on the OBSERVABLE outcome: the rejection's error class + kind, and the
+// events that actually landed on the run's timeline — never on a spy call count.
+describe("resolveRunAdaptersWithBudgetPreflight — the meterability refusal reaches the run-setup path", () => {
+  it("REFUSES a codex × OpenRouter run with a ceiling, and lands both events on the run timeline", async () => {
+    // The BYOK shape a real tanren run carries: every role routed through
+    // `codex exec --json` pointed at OpenRouter, with a project dollar ceiling.
+    const routing = routingAll("codex", "credential/openrouter/acme/default");
+    const sink = recorder();
+    const thrown = await resolveRunAdaptersWithBudgetPreflight(preflightInput(routing, 50), ctx, sink.append).then(
+      () => null,
+      (error: unknown) => error,
+    );
+    expect(thrown).toBeInstanceOf(UnenforceableBudgetCeilingError);
+    // The UNENFORCEABLE shape (a permanent, unclearable gate latch), NOT the
+    // pre-existing M6 `unreachable` one — the two are symmetric opposites and the
+    // call site must surface the right one for this route.
+    expect((thrown as UnenforceableBudgetCeilingError).kind).toBe("unenforceable");
+    expect((thrown as UnenforceableBudgetCeilingError).refKind).toBe("credential/openrouter/acme");
+    // Narration first (unconditional), then the loud refusal — in that order.
+    expect(sink.events.map((e) => e.eventType)).toEqual(["cost.route_unmeterable", "cost.ceiling_unenforceable"]);
+    expect(sink.events[1]?.payload).toMatchObject({ reason: "harness_discards_generation_id", ceilingUsd: 50 });
+  });
+
+  it("still NARRATES the unmeterable route on an UNBUDGETED run, and lets it proceed", async () => {
+    // No ceiling ⇒ nothing to refuse, but the operator would otherwise discover the
+    // run's all-NULL cost_usd only from a $0 spend report. The narrate call is
+    // unconditional inside `runBudgetCeilingPreflight`, so this is the assertion that
+    // the setup path calls it at all rather than only on the throwing branch.
+    const routing = routingAll("codex", "credential/openrouter/acme/default");
+    const sink = recorder();
+    const { adapters } = await resolveRunAdaptersWithBudgetPreflight(preflightInput(routing), ctx, sink.append);
+    expect(adapters.writer.cli).toBe("codex");
+    expect(sink.events.map((e) => e.eventType)).toEqual(["cost.route_unmeterable"]);
+    // Secret-free: the credential NAME segment ("default") is stripped from the event.
+    expect(sink.events[0]?.payload).toMatchObject({ cli: "codex", refKind: "credential/openrouter/acme" });
+  });
+
+  it("stays QUIET and proceeds on a meterable route with a ceiling (the working path emits nothing)", async () => {
+    // The negative control for the two above: a codex subscription writer WITH the
+    // codex probe is both meterable and enforceable, so the same setup path must emit
+    // no cost events and return adapters normally.
+    const routing = routingAll("codex", "credential/codex/org/o1/default");
+    const sink = recorder();
+    const { usageProbe } = await resolveRunAdaptersWithBudgetPreflight(preflightInput(routing, 50), ctx, sink.append);
+    expect(usageProbe).toBeDefined();
+    expect(sink.events).toEqual([]);
   });
 });
