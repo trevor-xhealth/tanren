@@ -18,6 +18,12 @@
 //     does NOT globally activate mise). This module is NEVER applied there: the codex
 //     exec path (engine/providers/codex.ts) builds its command directly and stays on
 //     the harness node, untouched by the project's toolchain.
+//   - PROJECT-HOOK path — a Tanren-issued `git commit` that leaves the repo's hook path
+//     LIVE (`withProjectHookToolchain`). The git binary is the harness's, but the hook
+//     it fires is the PROJECT's code, so the hook needs the PROJECT's toolchain. See
+//     that function for the full rationale; it is the same activation, invoked for a
+//     third reason, and it does NOT put the project's toolchain on the harness path —
+//     the codex exec that produced the changes has already exited by then.
 //
 // SECURITY: like the app-env prelude, the activation is prepended ONLY to the EXECUTED
 // command string handed to the SSH substrate — never to a logged/emitted command (gate
@@ -362,6 +368,49 @@ function miseActivationPrelude(workspacePath: string): string {
  */
 export function withMiseActivation(command: string, workspacePath: string): string {
   return `${miseActivationPrelude(workspacePath)}${command}`;
+}
+
+/**
+ * Prepend the SAME activation to a Tanren-issued git command that runs the PROJECT's
+ * commit hooks. Distinct from {@link withMiseActivation} only in WHY, and named so every
+ * call site states which of the module's paths it is on.
+ *
+ * THE RULE: if Tanren issues a git command that leaves the repo's hook path live, that
+ * command executes the project's code and must therefore carry the project's toolchain.
+ * A `git commit` is not "a git command" from the hook's point of view — it is the
+ * project's `.husky/pre-commit` (or lefthook, or a bare `.git/hooks/pre-commit`) running
+ * `pnpm`/`node`/`bundle`. Those resolve against PATH, and the runner ships NO project
+ * toolchain by design (runner/Dockerfile: mise is a binary on PATH, never globally
+ * activated), so a commit shell without it has exactly the harness node and nothing
+ * else. MEASURED on a live runner, in the exact shell `buildSshExecCommand` produces:
+ *
+ *   PATH=/usr/local/bin:/usr/bin:/bin:/usr/games
+ *   pnpm: NOT-FOUND
+ *   .husky/pre-commit: 2: pnpm: not found   →   husky - pre-commit script failed
+ *
+ * …while the same shell with this prelude resolves the provisioned
+ * `…/mise/installs/pnpm/<version>/pnpm` and the hook RUNS AND PASSES. The toolchain was
+ * never missing — `miseProvisionCommand` installed it at workspace-prep; it simply was
+ * not on PATH for this subprocess, because `runWorkspaceSshCommand` adds no prelude and
+ * the activation was wired at exactly three call sites, none of them a commit.
+ *
+ * WHY ACTIVATE RATHER THAN BYPASS THE HOOKS. A `git commit` CAN be taken off the repo's
+ * hooks with `-c core.hooksPath=/dev/null`, and for a commit that is purely Tanren's own
+ * bookkeeping — one that never reaches the PR — that is the right call. These commits are
+ * NOT that: they carry content into the PR a reviewer will read, so suppressing their
+ * hooks would be a silent policy change (Tanren deciding the project's pre-commit gate
+ * does not apply to Tanren-authored content). The project's hook is also CORRECT: it
+ * legitimately needs the toolchain. A hook that runs and passes is evidence; a hook that
+ * was skipped is not. So we satisfy the hook instead of silencing it.
+ *
+ * SCOPE. Commit-time hooks only (pre-commit / prepare-commit-msg / commit-msg), which is
+ * what the whole activation is guarded and proven for. `pre-push` hooks on the workspace
+ * push paths are the same class of exposure and are deliberately NOT changed here: no
+ * push-hook failure has been observed, and those commands carry auth material on stdin,
+ * so they are left for a change that can prove itself the way this one does.
+ */
+export function withProjectHookToolchain(command: string): string {
+  return withMiseActivation(command);
 }
 
 // The mise PROVISIONING commands run at workspace-prep, BEFORE the project's bootstrap,

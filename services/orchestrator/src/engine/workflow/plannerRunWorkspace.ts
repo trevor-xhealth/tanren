@@ -16,6 +16,7 @@ import { quoteSshShellArg } from "../ssh/command.js";
 import {
   bootstrapWorkspace,
   commitBootstrapState,
+  buildContractFilesCommitCommand,
   materializeContractFilesInWorkspace,
   provisionMiseToolchain,
   runWorkspaceSshCommand,
@@ -288,17 +289,10 @@ async function materializeContractFilesCommit(
     label: "commit deterministic contract files",
     cwd: workspacePath,
     watchdog: buildActivityWatchdog({ substrate: input.ssh, target, cls: "vcs", workspace: workspacePath }),
-    command: [
-      "set -eu",
-      // Stage ONLY the contract files (not -A) so this commit carries the contract
-      // and nothing else — the bootstrap commit already absorbed install artifacts.
-      `git add ${result.written.map((p) => quoteSshShellArg(p)).join(" ")}`,
-      "GIT_AUTHOR_DATE='2026-01-01T00:00:00Z' GIT_COMMITTER_DATE='2026-01-01T00:00:00Z' " +
-        `git commit -q -m ${quoteSshShellArg("tanren: project contract files (.tanren/ci.yml + justfile)")}`,
-      // Echo the contract-commit sha LAST so it is the command's stdout — it becomes
-      // the answerer review base. A fake SSH yields ""; the real runner a 40-hex sha.
-      "git rev-parse HEAD",
-    ].join(" && "),
+    // Built in workspace/contractMaterialize.ts, next to the materialization it commits.
+    // It runs with the project's toolchain active because this commit — unlike Tanren's
+    // bootstrap commit — keeps the repo's hooks LIVE and ships its content in the PR.
+    command: buildContractFilesCommitCommand(result.written),
   });
   return committed.stdout.trim();
 }

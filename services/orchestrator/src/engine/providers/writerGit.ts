@@ -2,6 +2,7 @@ import type { RunnerHandle } from "../contracts/allocator.js";
 import type { CommandSubstrate } from "../contracts/commandSubstrate.js";
 import { runWorkspaceSshCommand } from "../workspace/index.js";
 import { buildActivityWatchdog } from "../ssh/activityWatchdog.js";
+import { withProjectHookToolchain } from "../ssh/miseActivate.js";
 import type { Commit, WriterResult } from "./types.js";
 
 // shared baseline/diff/commit capture for CLI writer adapters that,
@@ -60,16 +61,22 @@ async function commitWorkspaceChanges(
   workspace: string,
   commitMessage: string,
 ): Promise<void> {
+  // PROJECT-HOOK path (ssh/miseActivate.ts) — see the twin in codexGit.ts. This commit
+  // keeps the repo's hooks LIVE because it carries the writer's content into the PR, so
+  // the project's pre-commit hook is the project's own code and needs the project's
+  // toolchain on PATH. A no-op for a repo that declared none.
   await runWorkspaceSshCommand(ssh, target, {
     label: "commit writer workspace changes",
     cwd: workspace,
-    command: [
-      "set -eu",
-      "git add -A",
-      "if ! git diff --cached --quiet --exit-code; then",
-      `GIT_AUTHOR_DATE='2026-01-01T00:00:00Z' GIT_COMMITTER_DATE='2026-01-01T00:00:00Z' git commit -m ${shellSingleQuote(commitMessage)}`,
-      "fi",
-    ].join("\n"),
+    command: withProjectHookToolchain(
+      [
+        "set -eu",
+        "git add -A",
+        "if ! git diff --cached --quiet --exit-code; then",
+        `GIT_AUTHOR_DATE='2026-01-01T00:00:00Z' GIT_COMMITTER_DATE='2026-01-01T00:00:00Z' git commit -m ${shellSingleQuote(commitMessage)}`,
+        "fi",
+      ].join("\n"),
+    ),
     watchdog: buildActivityWatchdog({ substrate: ssh, target, cls: "vcs", workspace }),
   });
 }
