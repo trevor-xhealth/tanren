@@ -1,4 +1,5 @@
 export * from "./bootstrap.js";
+export * from "./setup.js";
 export * from "./outputTail.js";
 export * from "./toolchainDeclarations.js";
 export * from "./toolchainEnforcement.js";

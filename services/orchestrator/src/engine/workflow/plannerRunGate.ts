@@ -17,8 +17,9 @@ import {
   invalidCiConfigGateOutcome,
   isInvalidCiConfigError,
   isWorkspaceDepsInstallError,
-  resolveBootstrapCommand,
   resolveGateConfig,
+  resolveWorkspaceLifecycleCommands,
+  type WorkspaceLifecycleCommands,
   runGateForWhen,
   workspaceDepsInstallGateOutcome,
 } from "./gate/index.js";
@@ -132,7 +133,9 @@ export function buildDefaultGate(
   // Undefined here ⇒ no explicit command, and the per-gate default is the
   // stack-agnostic DEFAULT_BOOTSTRAP_COMMAND LOUD-fallback — see the bootstrap block
   // below.
-  let installCommandPromise: Promise<string | undefined> | undefined;
+  // Memoized for the run: BOTH preparation commands, from one read of `.tanren/ci.yml`
+  // (the per-gate `bootstrap.run` and the once-per-workspace `setup.run`).
+  let lifecyclePromise: Promise<WorkspaceLifecycleCommands> | undefined;
   // The lazily-resolved ACTIVE flaky-quarantine, memoized for the run. Loaded
   // org-scoped off the run's `input.pool` (RLS denies by default — a read off the
   // wrong scope sees ZERO rows). The CI-intelligence ACTUATION (closes the
@@ -192,17 +195,15 @@ export function buildDefaultGate(
       // `.tanren/ci.yml` is invalid"), fail-closed (never a pass). The worker survives.
       return invalidCiConfigGateOutcome(resolved.invalid, when, appendEvent, taskId);
     }
-    if (installCommandPromise === undefined) {
-      // Resolve the EXPLICIT install command, if any: an `input.bootstrapCommand`
-      // override wins; otherwise the repo's `.tanren/ci.yml` `bootstrap.run`
-      // (undefined when the repo ships no `bootstrap:` key). The greenfield-vs-
-      // brownfield DEFAULT (applied below only when this is undefined) is NOT
-      // baked in here, so an explicit command always wins verbatim in both cases.
-      installCommandPromise =
-        input.bootstrapCommand === undefined
-          ? resolveBootstrapCommand({ ssh: input.ssh, target, workspacePath })
-          : Promise.resolve(input.bootstrapCommand);
-    }
+    // Resolve the repo's declared preparation commands once per run. The EXPLICIT
+    // install-command override (`input.bootstrapCommand`) is applied BELOW rather than
+    // short-circuiting the read, because `setup.run` has no override and must be read
+    // either way — and in a greenfield run the writer AUTHORS the `.tanren/ci.yml` mid-run,
+    // so the gate is the first place a newly-declared `setup` verb can be seen. The
+    // greenfield-vs-brownfield bootstrap DEFAULT is still NOT baked in here, so an
+    // explicit command always wins verbatim. This read is not new work at this boundary:
+    // the gate-config resolution above already read the same file.
+    lifecyclePromise ??= resolveWorkspaceLifecycleCommands({ ssh: input.ssh, target, workspacePath });
     // Bootstrap before the gate runs, EVERY gate (no latch). The project's `just
     // bootstrap` is idempotent (it reconciles an already-prepared tree as a cheap
     // no-op), and re-running it each gate is what catches a writer-added dependency
@@ -234,13 +235,18 @@ export function buildDefaultGate(
     // LOUD-fallback (`just bootstrap` if a justfile is present, else a loud failure).
     // Tanren names NO stack and makes NO greenfield-vs-frozen choice: that concern
     // lives inside the project's `just bootstrap` recipe.
-    const resolvedInstallCommand = await installCommandPromise;
+    const lifecycle = await lifecyclePromise;
+    const resolvedInstallCommand = input.bootstrapCommand ?? lifecycle.bootstrap;
     try {
       await ensureWorkspaceDepsInstalled({
         ssh: input.ssh,
         target,
         workspacePath,
         ...(resolvedInstallCommand === undefined ? {} : { command: resolvedInstallCommand }),
+        // The repo's once-per-workspace `setup.run`. Latched, so on this path — where
+        // `prepareRunWorkspace` already ran it — it is a single `[ -f ]` test; it is here
+        // so a writer that DECLARES a `setup` verb mid-run still gets it honored.
+        ...(lifecycle.setup === undefined ? {} : { setupCommand: lifecycle.setup }),
         ...(input.appEnv === undefined ? {} : { appEnv: input.appEnv }),
       });
     } catch (error: unknown) {

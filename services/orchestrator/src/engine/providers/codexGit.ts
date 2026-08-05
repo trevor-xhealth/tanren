@@ -57,6 +57,7 @@ async function commitWorkspaceChangesAfterCodex(
         "GIT_AUTHOR_DATE='2026-01-01T00:00:00Z' GIT_COMMITTER_DATE='2026-01-01T00:00:00Z' git commit -m 'codex writer'",
         "fi",
       ].join("\n"),
+      workspace,
     ),
     watchdog: buildActivityWatchdog({ substrate: ssh, target, cls: "vcs", workspace }),
   });

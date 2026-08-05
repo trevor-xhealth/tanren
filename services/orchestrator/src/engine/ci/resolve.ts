@@ -136,6 +136,20 @@ export function bootstrapCommand(config: CiConfigV1): string | undefined {
   return config.bootstrap?.run;
 }
 
+// The ONCE-PER-WORKSPACE environment-preparation command (see `CiSetup`), or undefined
+// when the repo declares no `setup` verb.
+//
+// ABSENCE IS SEMANTIC, and note what DEFAULT_CI_CONFIG does NOT contain: unlike
+// `bootstrap`/`upgrade`/`deploy`, there is no `setup: { run: "just setup" }` default. A
+// default would make every repository that ships no `.tanren/ci.yml` — every greenfield
+// scaffold, on its very first prep — run a `just setup` recipe that does not exist, and
+// halt. The other verbs can afford a `just <verb>` default because they are invoked at
+// points where a justfile is already the contract; workspace setup runs before anything,
+// on a tree that may still be empty. So: declared or absent, nothing in between.
+export function setupCommand(config: CiConfigV1): string | undefined {
+  return config.setup?.run;
+}
+
 // The dependency-bump command a version-change DAG node runs (environment-
 // management.md §4.5/§7 P1), or undefined when the repo declares no `upgrade` verb.
 // The COMMAND is the project's own (conventionally `just upgrade`, deferring to its

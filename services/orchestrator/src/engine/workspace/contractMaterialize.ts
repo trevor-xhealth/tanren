@@ -98,7 +98,7 @@ async function writeIfAbsent(
  * commit; it only stays latent because a brownfield repo already ships both contract
  * files, writes nothing, and so never reaches a commit at all.
  */
-export function buildContractFilesCommitCommand(writtenPaths: readonly string[]): string {
+export function buildContractFilesCommitCommand(writtenPaths: readonly string[], workspacePath: string): string {
   return withProjectHookToolchain(
     [
       "set -eu",
@@ -111,5 +111,6 @@ export function buildContractFilesCommitCommand(writtenPaths: readonly string[])
       // the answerer review base. A fake SSH yields ""; the real runner a 40-hex sha.
       "git rev-parse HEAD",
     ].join(" && "),
+    workspacePath,
   );
 }

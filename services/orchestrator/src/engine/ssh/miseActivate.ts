@@ -31,6 +31,8 @@
 // into every event. The prelude contains no secret material.
 
 import { quoteSshShellArg } from "./command.js";
+import { workspaceScopePrefix } from "./workspaceScope.js";
+import { withWorkspaceToolPath } from "./workspaceToolPath.js";
 
 // The conventional path of the project's `mise.toml` (mirrors
 // SKELETON_MISE_CONFIG_PATH; kept local so this ssh helper has no scaffold dep). The
@@ -110,10 +112,6 @@ export function miseSharedDirPrelude(): string {
 // {@link MISE_SHARED_LOCK_FILE} — shared ON PURPOSE, because a per-run lock excludes
 // nothing.
 
-/** The run sandbox shape (`workspace/paths.ts`), mirrored rather than imported so this
- * ssh helper keeps the zero-dependency posture {@link MISE_CONFIG_REL_PATH} has. */
-const RUN_WORKSPACE_PATTERN = /^(\/workspace\/runs\/run_[A-Za-z0-9_-]+)\/repo$/u;
-
 /** The mutual-exclusion point for the SHARED mise data dir. One path for the whole
  * runner: two runs holding two different locks would serialise nothing. */
 export const MISE_SHARED_LOCK_FILE = "$HOME/.tanren-mise.lock";
@@ -161,31 +159,11 @@ export interface MiseRunScope {
  * per-workspace name in the runner user's home rather than throwing.
  */
 export function miseRunScope(workspacePath: string): MiseRunScope {
-  const runDir = RUN_WORKSPACE_PATTERN.exec(workspacePath)?.[1];
-  const prefix = runDir === undefined ? `$HOME/.tanren-mise-${workspaceKey(workspacePath)}` : `${runDir}/tanren-mise`;
+  // The prefix rule ("a path only this run owns, outside the repo tree") lives in
+  // ./workspaceScope.ts — shared with the workspace TOOL DIRECTORY, which needs the
+  // identical rule. The emitted strings are unchanged.
+  const prefix = workspaceScopePrefix(workspacePath, "mise");
   return { configFile: `${prefix}-config.toml`, markerFile: `${prefix}-provisioned`, lockFile: MISE_SHARED_LOCK_FILE };
-}
-
-// A readable slug plus a hash of the FULL path, so two workspaces that slugify alike
-// still get distinct files. Reduced to `[A-Za-z0-9-]` because these paths are emitted
-// inside double quotes (to let `$HOME` expand) and must carry no other shell metachar.
-function workspaceKey(workspacePath: string): string {
-  const slug = workspacePath
-    .replaceAll(/[^A-Za-z0-9]+/gu, "-")
-    .slice(-40)
-    .replaceAll(/^-+|-+$/gu, "");
-  return `${slug === "" ? "workspace" : slug}-${stableHash(workspacePath)}`;
-}
-
-// A plain polynomial rolling hash — deterministic across processes, which is all that is
-// asked of it. Not a checksum and not security-bearing: it only keeps two workspaces
-// whose slugs collide from sharing one mise config.
-function stableHash(value: string): string {
-  let hash = 0;
-  for (const character of value) {
-    hash = (hash * 31 + (character.codePointAt(0) ?? 0)) % 0xff_ff_ff_ff;
-  }
-  return hash.toString(16).padStart(8, "0");
 }
 
 /**
@@ -367,7 +345,18 @@ function miseActivationPrelude(workspacePath: string): string {
  * ({@link miseRunScope}), which is what keeps concurrent runs off each other's toolchain.
  */
 export function withMiseActivation(command: string, workspacePath: string): string {
-  return `${miseActivationPrelude(workspacePath)}${command}`;
+  // THE PROJECT ENVIRONMENT IS TWO HALVES, and this is the single entry point both are
+  // applied at — deliberately, because a project command that got one half and not the
+  // other is precisely the bug class this and #1418 exist to close.
+  //   - The DECLARED language toolchain (mise), below.
+  //   - The workspace TOOL DIRECTORY (`$TANREN_BIN`) — the writable, run-scoped `bin` a
+  //     project's own `setup.run` installs native binaries into (gitleaks, shellcheck,
+  //     terraform, …), which no manifest declares and mise does not provide. See
+  //     ./workspaceToolPath.ts for why a repository otherwise has nowhere to put one.
+  // Tool-path FIRST so the mise prelude's `PATH` prepend lands on top of it: a tool whose
+  // version the repository actually DECLARED always outranks a same-named binary in the
+  // tool directory.
+  return withWorkspaceToolPath(`${miseActivationPrelude(workspacePath)}${command}`, workspacePath);
 }
 
 /**
@@ -409,8 +398,8 @@ export function withMiseActivation(command: string, workspacePath: string): stri
  * push-hook failure has been observed, and those commands carry auth material on stdin,
  * so they are left for a change that can prove itself the way this one does.
  */
-export function withProjectHookToolchain(command: string): string {
-  return withMiseActivation(command);
+export function withProjectHookToolchain(command: string, workspacePath: string): string {
+  return withMiseActivation(command, workspacePath);
 }
 
 // The mise PROVISIONING commands run at workspace-prep, BEFORE the project's bootstrap,

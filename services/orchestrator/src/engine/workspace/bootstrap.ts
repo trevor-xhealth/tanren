@@ -19,6 +19,7 @@ import {
   toolchainRetractionCommand,
 } from "./toolchainProvision.js";
 import { parseToolchainResolutions, type ToolchainResolution } from "./toolchainEnforcement.js";
+import { ensureWorkspaceSetup } from "./setup.js";
 import { runWorkspaceSshCommand } from "./ssh.js";
 
 // The commit message used for the synthetic post-bootstrap commit. Install
@@ -72,6 +73,10 @@ export interface BootstrapWorkspaceInput {
   // `workspace.failed` / `run.failed` event payloads. Distinct from Tanren's own
   // provider creds. Undefined ⇒ no app env (command unchanged).
   appEnv?: Record<string, string>;
+  // The repo's ONCE-PER-WORKSPACE `.tanren/ci.yml` `setup.run` (workspace/setup.ts),
+  // ensured (latched) before this install runs. Undefined ⇒ the repo declared no setup
+  // verb and no round-trip is made. See the invariant note on `bootstrapWorkspace`.
+  setupCommand?: string;
 }
 
 // A typed, observable bootstrap failure. Carries the exit code and a bounded
@@ -98,6 +103,18 @@ export class WorkspaceBootstrapError extends Error {
 // nonzero exit, timeout, or substrate failure.
 export async function bootstrapWorkspace(input: BootstrapWorkspaceInput): Promise<CommandResult> {
   const command = input.command ?? DEFAULT_BOOTSTRAP_COMMAND;
+  // THE INVARIANT: no project install command runs in a workspace whose declared SETUP has
+  // not been ensured — enforced at BOTH install doors (here and `ensureWorkspaceDepsInstalled`)
+  // rather than at one orchestration site, so a caller reaching an install by another route
+  // (the merge gates, benchmark/liveAccept) cannot get a half-prepared workspace. Latched; a
+  // `WorkspaceSetupError` is NOT a `WorkspaceBootstrapError`, so self-healing declines it.
+  await ensureWorkspaceSetup({
+    ssh: input.ssh,
+    target: input.target,
+    workspacePath: input.workspacePath,
+    ...(input.setupCommand === undefined ? {} : { command: input.setupCommand }),
+    ...(input.appEnv === undefined ? {} : { appEnv: input.appEnv }),
+  });
   // SUBSTRATE BOUNDARY: the app-env prelude is prepended ONLY to the string handed
   // to `ssh.run` — never to `command`, which is the value that flows into the
   // error message / log below. So a bootstrap failure surfaces the ORIGINAL
@@ -169,6 +186,13 @@ export interface EnsureWorkspaceDepsInput {
   // to `command`, so a failure surfaces the ORIGINAL command (prelude-free) and no
   // app-secret value can reach the error message / events. Undefined ⇒ no app env.
   appEnv?: Record<string, string>;
+  // The repo's ONCE-PER-WORKSPACE `.tanren/ci.yml` `setup.run` (workspace/setup.ts).
+  // Ensured here, LATCHED, before the per-gate install — so the MERGE-gate paths, which
+  // clone a FRESH workspace and never go through `prepareRunWorkspace`, still get the
+  // repo's environment prepared before their gate (and before any commit whose hooks are
+  // live) instead of only the run-loop path getting it. Undefined ⇒ the repo declared no
+  // setup verb and the step makes no round-trip at all.
+  setupCommand?: string;
 }
 
 // The outcome of an ensure call: whether the guarded install actually RAN the
@@ -233,6 +257,17 @@ export async function ensureWorkspaceDepsInstalled(
   input: EnsureWorkspaceDepsInput,
 ): Promise<EnsureWorkspaceDepsResult> {
   const command = input.command ?? DEFAULT_BOOTSTRAP_COMMAND;
+  // The other install door — same invariant as `bootstrapWorkspace` above. It matters here
+  // because the MERGE-gate paths clone their OWN workspace and reach a gate without ever
+  // running workspace-prep; without this they would gate a tree never prepared. A
+  // `WorkspaceSetupError` propagates: the gate's writer-routing boundary does not claim it.
+  await ensureWorkspaceSetup({
+    ssh: input.ssh,
+    target: input.target,
+    workspacePath: input.workspacePath,
+    ...(input.setupCommand === undefined ? {} : { command: input.setupCommand }),
+    ...(input.appEnv === undefined ? {} : { appEnv: input.appEnv }),
+  });
   // The guard runs entirely runner-side in ONE round-trip: if the project CONTRACT
   // (`justfile` / `.tanren/ci.yml`) is present, print the install sentinel then run
   // the bootstrap; otherwise print the no-op sentinel and exit 0. It runs whenever

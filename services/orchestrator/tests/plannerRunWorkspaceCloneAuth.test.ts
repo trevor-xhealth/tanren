@@ -27,11 +27,25 @@ const target: RunnerHandle = {
 // Captures every command (and its stdin) so the test can assert the token is
 // only ever delivered over stdin. The clone's trailing `git rev-parse HEAD`
 // must return a sha, so the recorder yields a fixed clone HEAD.
+// The `.tanren/ci.yml` READ specifically — `if [ -f <p> ]; then cat <p>; fi`. Matched on
+// the `then cat` shape rather than the path, because the contract MATERIALIZATION command
+// names the same path and must NOT be answered as a config read.
+function isCiConfigRead(command: RunnerCommand): boolean {
+  return command.command.includes("; then cat ") && command.command.includes(".tanren/ci.yml");
+}
+
 class RecordingSsh implements CommandSubstrate {
   readonly commands: Array<{ target: RunnerHandle; command: RunnerCommand }> = [];
 
   async run(sshTarget: RunnerHandle, command: RunnerCommand): Promise<CommandResult> {
     this.commands.push({ target: sshTarget, command });
+    // The `.tanren/ci.yml` read is a `cat`-if-present: a repo that ships no config
+    // emits NOTHING on stdout and exits 0. Answering it with the clone sha (as a
+    // catch-all would) is not a shape any runner produces, and would feed a 40-hex
+    // string to the YAML parser.
+    if (isCiConfigRead(command)) {
+      return { exitCode: 0, stdout: "", stderr: "", timedOut: false };
+    }
     return { exitCode: 0, stdout: CLONE_HEAD, stderr: "", timedOut: false };
   }
 }

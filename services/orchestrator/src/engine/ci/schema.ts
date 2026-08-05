@@ -118,6 +118,47 @@ export const CiBootstrap = z
   .strict();
 export type CiBootstrap = z.infer<typeof CiBootstrap>;
 
+// ---- Setup -----------------------------------------------------------------
+
+// Optional `setup` verb — the project-declared command that prepares this WORKSPACE
+// ONCE, before anything else runs in it.
+//
+// WHY IT IS NOT `bootstrap`. `bootstrap.run` is UNLATCHED by design: it runs before
+// EVERY gate, because a writer that adds a dependency mid-run must get it installed
+// before the next one, and the project's own recipe is the idempotency authority. That
+// makes `bootstrap` the right home for "ensure this tree's dependencies are current" and
+// the WRONG home for "install the native binaries this environment needs" — a
+// multi-megabyte download per gate. A repository facing that choice does not fail loudly;
+// it QUIETLY DECLARES LESS. Measured, in a real target repo's own contract:
+//
+//   # Deliberately not scripts/bootstrap.sh, which wants sudo, network and a
+//   # terraform/tflint/gitleaks install on every gate.
+//   bootstrap:
+//     run: pnpm install --frozen-lockfile && uv sync --group dev
+//
+// The repository was right about the cost and correct to refuse it — and the consequence
+// was that its own `.husky/pre-commit` then blocked every Tanren commit on
+// `error: gitleaks is not installed or not on PATH`. Tanren had one preparation verb
+// priced for one lifecycle phase, so the other phase went undeclared. This verb is that
+// second phase, and having it is what makes the first one honest.
+//
+// SEMANTICS. At most once per workspace, latched on success (workspace/setup.ts). Runs
+// AFTER the declared toolchain is provisioned (so it may use node/python/…) and BEFORE
+// the project's `bootstrap`, so bootstrap may use whatever it installed. Same opaque
+// `{ run }` shape as `bootstrap`/`upgrade`/`deploy`; Tanren never parses the shell.
+//
+// ABSENCE IS SEMANTIC — and there is deliberately NO default and NO convention-based
+// detection of `scripts/bootstrap.sh` / `script/bootstrap` / `bin/setup` / `make setup`.
+// A guess cannot read intent: against the repository above, detection would have executed
+// the exact script that repository's contract states must not run. A declaration is
+// intent. See workspace/setup.ts for the trust argument.
+export const CiSetup = z
+  .object({
+    run: z.string().min(1),
+  })
+  .strict();
+export type CiSetup = z.infer<typeof CiSetup>;
+
 // ---- Upgrade ---------------------------------------------------------------
 
 // Optional `upgrade` verb (environment-management.md §4.5 + §7 P1) — the
@@ -192,6 +233,9 @@ export type CiWhenPolicy = z.infer<typeof CiWhenPolicy>;
 export const CiConfigV1 = z
   .object({
     version: z.literal(1),
+    // The project's ONCE-PER-WORKSPACE environment preparation (see `CiSetup`). Optional
+    // + opaque; no default and no detection — a repository that declares none gets none.
+    setup: CiSetup.optional(),
     bootstrap: CiBootstrap.optional(),
     // The project's dependency-bump command (environment-management.md §4.5/§7 P1).
     // Optional + opaque — see `CiUpgrade`. Tanren runs it inside a gated upgrade DAG

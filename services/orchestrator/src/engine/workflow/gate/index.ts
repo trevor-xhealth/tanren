@@ -14,7 +14,9 @@ export {
   GateConfigReadError,
   resolveBootstrapCommand,
   resolveGateConfig,
+  resolveWorkspaceLifecycleCommands,
   type ResolveGateConfigInput,
+  type WorkspaceLifecycleCommands,
 } from "./resolveGateConfig.js";
 export {
   CI_CONFIG_GATE_STEP,

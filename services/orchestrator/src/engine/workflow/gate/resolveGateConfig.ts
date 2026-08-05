@@ -7,7 +7,7 @@
 // loudly rather than gating against nothing. A READ FAILURE (substrate error,
 // timeout, nonzero exit) is NOT treated as "absent": it throws, so a transient
 // substrate hiccup can never silently downgrade a repo's real gate to the defaults.
-import { bootstrapCommand, type CiConfigV1, resolveCiConfig } from "../../ci/index.js";
+import { bootstrapCommand, type CiConfigV1, resolveCiConfig, setupCommand } from "../../ci/index.js";
 import type { RunnerHandle } from "../../contracts/allocator.js";
 import type { CommandSubstrate } from "../../contracts/commandSubstrate.js";
 import { quoteSshShellArg } from "../../ssh/command.js";
@@ -87,4 +87,37 @@ export async function resolveBootstrapCommand(input: ResolveGateConfigInput): Pr
     return undefined;
   }
   return bootstrapCommand(resolveCiConfig(text));
+}
+
+/** The two workspace-preparation commands a repo declares, from ONE read of its
+ * `.tanren/ci.yml`. Both `undefined` when the repo ships no config file (the callers'
+ * documented fallbacks then apply — see each resolver above). */
+export interface WorkspaceLifecycleCommands {
+  bootstrap: string | undefined;
+  setup: string | undefined;
+}
+
+/**
+ * Resolve `bootstrap.run` + `setup.run` together, in a SINGLE substrate read.
+ *
+ * The two are always needed at the same moment (workspace-prep, and every fresh-workspace
+ * merge gate) and come from the same file; resolving them separately would double the
+ * round-trip and — worse — open a window in which the two could be read from different
+ * bytes. Same absent/invalid/read-failure semantics as {@link resolveBootstrapCommand}.
+ *
+ * NOTE what `setup: undefined` means: the repo declared no setup verb, so NONE is run.
+ * There is no fallback, because the verb has no default and Tanren does NOT go looking for
+ * a conventional `scripts/bootstrap.sh` to run in its place (workspace/setup.ts carries the
+ * argument — in short, a convention match is not consent, and against the repository that
+ * motivated this it would have run the exact script that repo's contract says must not run).
+ */
+export async function resolveWorkspaceLifecycleCommands(
+  input: ResolveGateConfigInput,
+): Promise<WorkspaceLifecycleCommands> {
+  const text = await readCiConfigText(input);
+  if (text === undefined) {
+    return { bootstrap: undefined, setup: undefined };
+  }
+  const config = resolveCiConfig(text);
+  return { bootstrap: bootstrapCommand(config), setup: setupCommand(config) };
 }

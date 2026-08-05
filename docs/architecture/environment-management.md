@@ -132,6 +132,42 @@ binary. (Both behaviors replace the earlier failure mode, where a repo without a
 `mise.toml` was read as "declared no toolchain", provisioning was silently skipped, and
 the run died three layers downstream on an opaque `pnpm: command not found`.)
 
+**Beyond the language toolchain — the `setup` verb.** Layers 1–2 cover what a repository
+declares in a _manifest_: node, python, go, pnpm, uv. They cannot reach the rest of a real
+repository's toolchain — the native binaries its own gates and commit hooks call by name
+(`gitleaks`, `shellcheck`, `terraform`, `protoc`, `hadolint`). Those appear in no manifest,
+so no widening of detection finds them, and they are not per-gate work: they are a one-time,
+network-bound install. `CiConfigV1` therefore carries a **`setup` verb** alongside
+bootstrap/upgrade/deploy — the project-declared command that prepares a **workspace** once.
+
+The distinction from `bootstrap` is a lifecycle phase, and it is load-bearing. `bootstrap.run`
+is **unlatched** by design, running before every gate so a writer-added dependency is always
+installed; that prices it per gate and makes it the wrong home for a native install. Given
+only `bootstrap`, a repository in that position does not fail loudly — it **declares less**,
+and its own hooks then fail on a binary nobody installed. `setup.run` runs **at most once per
+workspace**, latched by Tanren on success (the project is not asked to be the idempotency
+authority, which is the demand a native install cannot cheaply meet), after provisioning and
+before the project's bootstrap.
+
+**Declared, never detected.** Tanren does not probe for a conventional `scripts/bootstrap.sh`
+/ `script/bootstrap` / `bin/setup`. A convention match is not consent: the repository that
+motivated this verb states in its own contract that its bootstrap script must _not_ run per
+gate, and detection would have run exactly that script — which, being `sudo`-based, could not
+have worked on the non-root runner anyway. Tanren executes the commands a repository
+_declares_, which is a boundary it already crosses for `bootstrap`/`upgrade`/`deploy`/tiers;
+executing files it went looking for is a different act, and it is not taken.
+
+**Where the tools go — `$TANREN_BIN`.** A verb with nowhere to write is no verb at all. The
+runner's `PATH` is `/usr/local/bin:/usr/bin:/bin:/usr/games`, all root-owned, and the `tanren`
+user is non-root with no `sudo` — so Tanren creates a **run-scoped, writable tool directory**,
+exports it as `$TANREN_BIN`, and puts it on `PATH` for every command that runs the project's
+code, including the commits whose hooks are live. It is run-scoped rather than a shared
+`~/.local/bin` for the same reason the mise config is: three runs share one container as one
+unix user. The declared toolchain still wins — mise's `PATH` prepend lands on top of it — so
+this extends a project's environment and never overrides the versions it pinned. A failed
+`setup.run` halts and is attributed to the **repository's** setup, distinctly from Tanren's
+own faults, and is never routed to a remediation writer.
+
 ### Layer 2 — Provisioning (the neutral, capable runner)
 
 The runner becomes a **neutral sandbox**: base OS + `build-essential` (a C toolchain to

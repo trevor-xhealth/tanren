@@ -41,7 +41,7 @@ import {
 import {
   advisoryStepNamesForPosture,
   type GateOutcome,
-  resolveBootstrapCommand,
+  resolveWorkspaceLifecycleCommands,
   resolveGateConfig,
   runGateForWhen,
 } from "../workflow/gate/index.js";
@@ -234,7 +234,12 @@ async function installDepsForGate(
   target: RunnerHandle,
   workspacePath: string,
 ): Promise<void> {
-  const bootstrapCommand = await resolveBootstrapCommand({
+  // Both preparation commands from ONE read: the per-gate `bootstrap.run` and the
+  // once-per-workspace `setup.run`. This path clones its OWN workspace and never runs
+  // `prepareRunWorkspace`, so it is where THIS workspace's setup is honored — without it a
+  // merge gate would run against a tree whose environment was never prepared, and the repo's
+  // own hooks/steps would fail on binaries no manifest declares.
+  const lifecycle = await resolveWorkspaceLifecycleCommands({
     ssh: deps.ssh,
     target,
     workspacePath,
@@ -243,7 +248,8 @@ async function installDepsForGate(
     ssh: deps.ssh,
     target,
     workspacePath,
-    command: bootstrapCommand ?? DEFAULT_BOOTSTRAP_COMMAND,
+    command: lifecycle.bootstrap ?? DEFAULT_BOOTSTRAP_COMMAND,
+    ...(lifecycle.setup === undefined ? {} : { setupCommand: lifecycle.setup }),
   });
 }
 

@@ -28,7 +28,7 @@ import {
 import { gitAuthedCommand, gitTokenAuthPrelude } from "../workspace/githubPush.js";
 import { buildActivityWatchdog } from "../ssh/activityWatchdog.js";
 import { resolveVcsActorIdentity, resolveVcsToken } from "../credentials/vcsCredentials.js";
-import { resolveBootstrapCommand } from "./gate/index.js";
+import { resolveWorkspaceLifecycleCommands } from "./gate/index.js";
 import type { RunPlannerLoopInput } from "./plannerRun.js";
 import { resolveAncestorStack } from "../dag/ancestorStack.js";
 import { bootstrapDependentWorkspace, type ClonedWorkspace } from "./plannerRunJjLocalBootstrap.js";
@@ -41,6 +41,9 @@ export interface BootstrapStepInput {
   target: RunnerHandle;
   workspacePath: string;
   command?: string;
+  // The repo's once-per-workspace `setup.run`, ensured by the install step before it
+  // installs (workspace/setup.ts). Undefined ⇒ the repo declared no setup verb.
+  setupCommand?: string;
   // Plane B: the project's dev+test app env, injected at the SSH substrate boundary
   // (never folded into `command`, so a bootstrap failure can't leak it into the
   // error message / events). See bootstrap.ts. Undefined ⇒ no app env.
@@ -159,8 +162,10 @@ export async function prepareRunWorkspace(
   // `just bootstrap`); when the repo ships no .tanren/ci.yml the resolver yields
   // undefined and the bootstrap step falls back to the stack-agnostic
   // DEFAULT_BOOTSTRAP_COMMAND LOUD-fallback (just bootstrap, else a loud failure).
-  const resolvedBootstrapCommand =
-    input.bootstrapCommand ?? (await resolveBootstrapCommand({ ssh: input.ssh, target, workspacePath }));
+  // ONE read of `.tanren/ci.yml` yields BOTH preparation commands (per-gate `bootstrap.run`,
+  // once-per-workspace `setup.run`), so the two can never come from different bytes.
+  const lifecycle = await resolveWorkspaceLifecycleCommands({ ssh: input.ssh, target, workspacePath });
+  const resolvedBootstrapCommand = input.bootstrapCommand ?? lifecycle.bootstrap;
   // TOOLCHAIN PROVISION (environment-management.md §3 Layer 2): BEFORE the project's
   // `just bootstrap`, provision the toolchain the repo DECLARES. Detection reads the
   // repo's own `mise.toml` when it ships one and otherwise the standard declaration
@@ -199,6 +204,10 @@ export async function prepareRunWorkspace(
       target,
       workspacePath,
       command: resolvedBootstrapCommand,
+      // WORKSPACE SETUP (workspace/setup.ts): the repo's once-per-workspace environment
+      // preparation, ensured by the install step before it installs — so before the first
+      // commit whose hooks are live. A `WorkspaceSetupError` is NOT deferred below; it HALTS.
+      ...(lifecycle.setup === undefined ? {} : { setupCommand: lifecycle.setup }),
       ...(input.appEnv === undefined ? {} : { appEnv: input.appEnv }),
     });
   } catch (error: unknown) {
@@ -292,7 +301,7 @@ async function materializeContractFilesCommit(
     // Built in workspace/contractMaterialize.ts, next to the materialization it commits.
     // It runs with the project's toolchain active because this commit — unlike Tanren's
     // bootstrap commit — keeps the repo's hooks LIVE and ships its content in the PR.
-    command: buildContractFilesCommitCommand(result.written),
+    command: buildContractFilesCommitCommand(result.written, workspacePath),
   });
   return committed.stdout.trim();
 }

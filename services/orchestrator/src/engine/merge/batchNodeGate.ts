@@ -9,7 +9,7 @@
 // `seedWorkspaceLocalIgnore` + `ensureWorkspaceDepsInstalled` (the install the brownfield
 // re-gate needs), and `runGateForWhen` over the `pre_merge` tiers (the verdict).
 
-import { bootstrapCommand, type CiConfigV1 } from "../ci/index.js";
+import { bootstrapCommand, type CiConfigV1, setupCommand } from "../ci/index.js";
 import type { CommandSubstrate } from "../contracts/commandSubstrate.js";
 import type { GovernancePosture } from "../config/shared.js";
 import type { EventStore } from "../eventStore.js";
@@ -107,6 +107,11 @@ export function batchNodeGate(deps: BatchNodeGateClosureDeps): GateBatchWorkspac
       target: live.target,
       workspacePath: live.workspacePath,
     });
+    // The repo's once-per-workspace `setup.run`, from the SAME already-parsed config. This
+    // path clones its own workspace and never runs `prepareRunWorkspace`, so it is where
+    // THIS workspace's environment preparation is honored — a merge gate must not run
+    // against a tree whose environment was never prepared. Absent ⇒ no round-trip.
+    const workspaceSetup = setupCommand(config);
     await ensureWorkspaceDepsInstalled({
       ssh: deps.ssh,
       target: live.target,
@@ -115,6 +120,7 @@ export function batchNodeGate(deps: BatchNodeGateClosureDeps): GateBatchWorkspac
       // could re-throw the same validation error), or — when the config omits
       // `bootstrap.run` — the stack-agnostic DEFAULT_BOOTSTRAP_COMMAND LOUD-fallback.
       command: bootstrapCommand(config) ?? DEFAULT_BOOTSTRAP_COMMAND,
+      ...(workspaceSetup === undefined ? {} : { setupCommand: workspaceSetup }),
     });
     const outcome = await runGateForWhen({
       ssh: deps.ssh,
