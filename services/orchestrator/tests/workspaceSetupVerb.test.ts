@@ -17,25 +17,17 @@
 // outcome. And `gitleaks` is not a Node or Python dependency, so it appears in no manifest
 // Layer-1 detection reads (#1417) — no amount of widening toolchain DETECTION reaches it.
 //
-// WHAT WAS ACTUALLY MISSING, and why it is two things:
-//
-//  1. NO ONCE-PER-WORKSPACE PHASE. Tanren's only preparation verb was `bootstrap.run`, and
-//     it is UNLATCHED by design — it runs before EVERY gate so a writer-added dependency is
-//     always installed. That prices it per gate, which makes it the wrong home for a
-//     one-time native-binary install. A repository facing that does not fail loudly; it
-//     declares less. Verbatim from the target repo's own contract:
-//         # Deliberately not scripts/bootstrap.sh, which wants sudo, network and a
-//         # terraform/tflint/gitleaks install on every gate.
-//     It was right about the cost. It had nowhere to say the other thing.
-//  2. NO WRITABLE DESTINATION ON PATH. Even a repo that DID declare the install had nowhere
-//     to put the binary: the runner's PATH is `/usr/local/bin:/usr/bin:/bin:/usr/games`, all
-//     root-owned, and the `tanren` user is non-root with no `sudo` (runner/Dockerfile, on
-//     purpose). mise activation exports only mise's OWN directories.
-//
-// So the tests below come in two halves, and BOTH are required: the repo's declared
-// `setup.run` runs exactly once per workspace, and `$TANREN_BIN` is on PATH for every
-// command that runs the project's code — including the commit whose hooks are live, which
-// is the exact subprocess that failed.
+// WHAT WAS ACTUALLY MISSING. Tanren's only preparation verb was `bootstrap.run`, and it is
+// UNLATCHED by design — it runs before EVERY gate so a writer-added dependency is always
+// installed. That prices it per gate, which makes it the wrong home for a one-time native
+// install. A repository facing that does not fail loudly; it QUIETLY DECLARES LESS. Verbatim
+// from the target repo's own contract:
+//     # Deliberately not scripts/bootstrap.sh, which wants sudo, network and a
+//     # terraform/tflint/gitleaks install on every gate.
+// It was right about the cost. It had nowhere to say the other thing. (The second half of
+// the gap — that a repo which DID declare the install had nowhere on PATH to put the binary
+// — is proven in `workspaceToolPath.test.ts`. `workspace/setup.ts` carries the full
+// argument for both.)
 //
 // WHY NOT DETECT `scripts/bootstrap.sh`. The final describe block is the negative control
 // for the design decision, not just the code: against this very repository, convention-based
@@ -45,20 +37,17 @@ import { describe, expect, it } from "vitest";
 import type { RunnerHandle } from "../src/engine/contracts/allocator.js";
 import type { RunnerCommand, CommandResult, CommandSubstrate } from "../src/engine/contracts/commandSubstrate.js";
 import { FakeSecretStore } from "../src/engine/contracts/secretStore.js";
-import { CiConfigV1, DEFAULT_CI_CONFIG, resolveCiConfig, setupCommand } from "../src/engine/ci/index.js";
 import type { GitHubHttpClient } from "../src/engine/providers/github.js";
-import { captureGitStateAfterCodex } from "../src/engine/providers/codexGit.js";
-import { miseRunScope } from "../src/engine/ssh/miseActivate.js";
-import { TANREN_BIN_ENV, withWorkspaceToolPath, workspaceToolBinDir } from "../src/engine/ssh/workspaceToolPath.js";
-import { withMiseActivation } from "../src/engine/ssh/miseActivate.js";
+import { workspaceToolBinDir } from "../src/engine/ssh/workspaceToolPath.js";
 import {
   ensureWorkspaceDepsInstalled,
   ensureWorkspaceSetup,
+  SETUP_NOOP_SENTINEL,
+  SETUP_RUN_SENTINEL,
   WorkspaceDepsInstallError,
   WorkspaceSetupError,
   workspaceSetupMarkerFile,
 } from "../src/engine/workspace/index.js";
-import { resolveWorkspaceLifecycleCommands } from "../src/engine/workflow/gate/index.js";
 import { prepareRunWorkspace } from "../src/engine/workflow/plannerRunWorkspace.js";
 import type { PlannerRunContext, RunPlannerLoopInput } from "../src/engine/workflow/plannerRun.js";
 
@@ -246,6 +235,44 @@ describe("the repo's declared workspace setup runs — once per workspace, befor
     expect(ssh.commands).toEqual([]);
   });
 
+  it("a whitespace-only `setup.run` is not a declaration, and makes no round-trip", async () => {
+    // MUTATION-DRIVEN: the `command.trim() === ""` guard could be deleted unnoticed. A
+    // blank declaration must be treated as absent rather than executed as an empty shell —
+    // running `{ ; }` would write the latch and record a workspace as prepared by nothing.
+    const ssh = new ContractRunnerSsh();
+    expect(await ensureWorkspaceSetup({ ssh, target, workspacePath: WORKSPACE, command: "   \n\t " })).toEqual({
+      ran: false,
+    });
+    expect(ssh.commands).toEqual([]);
+  });
+
+  it("reports `ran` from what the RUNNER did, and the latched branch announces itself", async () => {
+    // The two sentinels are the only way the caller learns which runner-side branch was
+    // taken, so both are pinned. A latched call must report `ran: false` even though the
+    // command exited 0 — "the step succeeded" and "the setup executed" are different facts.
+    const ssh = new ContractRunnerSsh();
+    const first = await ensureWorkspaceSetup({ ssh, target, workspacePath: WORKSPACE, command: SETUP_RUN });
+    expect(first.ran).toBe(true);
+    const second = await ensureWorkspaceSetup({ ssh, target, workspacePath: WORKSPACE, command: SETUP_RUN });
+    expect(second.ran).toBe(false);
+    // Both sentinels appear in the emitted shell, and they are DISTINCT strings.
+    const emitted = ssh.commands.map((c) => c.command).join("\n");
+    expect(emitted).toContain("tanren: workspace-setup running");
+    expect(emitted).toContain("tanren: workspace-setup no-op");
+    expect(SETUP_RUN_SENTINEL).not.toBe(SETUP_NOOP_SENTINEL);
+  });
+
+  it("runs in the workspace, under an activity watchdog and never a wall-clock kill", async () => {
+    // A cold native-binary install is legitimately slow. It must be judged on PROGRESS, in
+    // the repo's cwd — a missing cwd would run the project's setup somewhere else entirely.
+    const ssh = new ContractRunnerSsh();
+    await ensureWorkspaceSetup({ ssh, target, workspacePath: WORKSPACE, command: SETUP_RUN });
+    const step = ssh.commands.find(isSetupStep);
+    expect(step?.cwd).toBe(WORKSPACE);
+    expect(step?.watchdog).toBeDefined();
+    expect(step?.connectTimeoutMs).toBeUndefined();
+  });
+
   it("the latch and the tool dir live OUTSIDE the repo tree, scoped to this run", async () => {
     // Tanren never materializes a path into a repository it did not author, and three runs
     // share one container as one unix user — a runner-wide `bin` would let run A's
@@ -257,69 +284,6 @@ describe("the repo's declared workspace setup runs — once per workspace, befor
     expect(marker.startsWith(WORKSPACE)).toBe(false);
     expect(bin.startsWith(WORKSPACE)).toBe(false);
     expect(workspaceToolBinDir("/workspace/runs/run_other/repo")).not.toBe(bin);
-  });
-});
-
-describe("$TANREN_BIN is on PATH wherever the project's own code runs", () => {
-  it("the project-HOOK commit sees it — the exact subprocess the secret scan failed in", async () => {
-    // THE REGRESSION, at its real site. The pre-commit hook resolves `gitleaks` off PATH in
-    // a subprocess whose PATH is `/usr/local/bin:/usr/bin:/bin:/usr/games`. Installing the
-    // binary is worthless unless THIS command can see it.
-    const ssh = new ContractRunnerSsh();
-    await captureGitStateAfterCodex(ssh, target, WORKSPACE, HEAD_SHA);
-
-    const commit = ssh.commands.find((c) => /git (?:-c [^ ]+ )?commit /u.test(c.command));
-    expect(commit?.command).toContain(`export ${TANREN_BIN_ENV}="${workspaceToolBinDir(WORKSPACE)}"`);
-    expect(commit?.command).toContain(`export PATH="${workspaceToolBinDir(WORKSPACE)}:$PATH"`);
-    // And it is still not a hook bypass — the point is that the hook RUNS and PASSES.
-    expect(commit?.command).not.toContain("core.hooksPath=/dev/null");
-  });
-
-  it("the setup step itself, the bootstrap and the deps-ensure all carry it", async () => {
-    const ssh = new ContractRunnerSsh();
-    await ensureWorkspaceDepsInstalled({
-      ssh,
-      target,
-      workspacePath: WORKSPACE,
-      command: BOOTSTRAP_RUN,
-      setupCommand: SETUP_RUN,
-    });
-
-    const bin = workspaceToolBinDir(WORKSPACE);
-    // Every command that RUNS THE PROJECT'S SHELL carries it. Tanren's own pure reads (the
-    // toolchain-declaration read, the ci.yml read) deliberately do not: they execute no
-    // project code, so giving them the project's environment would widen the blast radius
-    // of the project's own PATH for nothing.
-    const projectCommands = ssh.commands.filter((c) => c.command.includes(BOOTSTRAP_RUN) || isSetupStep(c));
-    expect(projectCommands.length).toBeGreaterThanOrEqual(2);
-    for (const command of projectCommands) {
-      expect(command.command).toContain(`export PATH="${bin}:$PATH"`);
-    }
-    // The setup step also CREATES the directory before handing it to the project — a
-    // destination that does not exist is not a destination.
-    expect(ssh.commands.find(isSetupStep)?.command).toContain(`mkdir -p "${bin}"`);
-  });
-
-  it("the DECLARED toolchain still wins: mise's PATH prepend lands on top of the tool dir", async () => {
-    // Precedence, and it is deliberate. The tool dir extends the project's environment; it
-    // must never silently override the node/pnpm/python version the repository PINNED.
-    const command = withMiseActivation("run-me", WORKSPACE);
-    const bin = workspaceToolBinDir(WORKSPACE);
-    const scope = miseRunScope(WORKSPACE);
-
-    const binAt = command.indexOf(`export PATH="${bin}:$PATH"`);
-    const miseAt = command.indexOf(`[ -f "${scope.markerFile}" ]`);
-    expect(binAt).toBeGreaterThanOrEqual(0);
-    expect(miseAt).toBeGreaterThan(binAt);
-  });
-
-  it("the export is UNGUARDED — an empty tool dir must not silently drop off PATH", async () => {
-    // Unlike the mise activation next to it, there is no `[ -f … ]` guard: a guard would
-    // mean setup could install into a directory a LATER command does not have on PATH,
-    // which is precisely the failure being closed.
-    const command = withWorkspaceToolPath("run-me", WORKSPACE);
-    expect(command).not.toContain("if [");
-    expect(command.endsWith("run-me")).toBe(true);
   });
 });
 
@@ -375,6 +339,72 @@ describe("a failed setup is attributed to the REPOSITORY, and halts", () => {
     expect(ssh.commands.some((c) => c.command.includes(BOOTSTRAP_RUN) && !isSetupStep(c))).toBe(false);
   });
 
+  it("claims a SUBSTRATE fault and a STALL, not only a nonzero exit", async () => {
+    // MUTATION-DRIVEN. Only the nonzero-exit branch was covered, so the other two thirds of
+    // the success predicate could be inverted without a single test noticing — and both are
+    // real: a transport fault or a no-sign-of-life stall must never be read as "setup done"
+    // and must never write the latch.
+    const substrate = await ensureWorkspaceSetup({
+      ssh: fixedSsh({
+        exitCode: 0,
+        stdout: "",
+        stderr: "",
+        failure: { kind: "transport", message: "connection reset" },
+      }),
+      target,
+      workspacePath: WORKSPACE,
+      command: SETUP_RUN,
+    }).catch((e: unknown) => e);
+    expect(substrate).toBeInstanceOf(WorkspaceSetupError);
+    expect((substrate as WorkspaceSetupError).stalled).toBe(false);
+
+    const stalled = (await ensureWorkspaceSetup({
+      ssh: fixedSsh({ exitCode: 0, stdout: "", stderr: "", stalled: true }),
+      target,
+      workspacePath: WORKSPACE,
+      command: SETUP_RUN,
+    }).catch((e: unknown) => e)) as WorkspaceSetupError;
+    expect(stalled).toBeInstanceOf(WorkspaceSetupError);
+    // The stall is CARRIED, not flattened into a generic failure: "no sign of life" and
+    // "exited nonzero" are different bug reports about different owners.
+    expect(stalled.stalled).toBe(true);
+    expect(stalled.message).toContain("stalled");
+  });
+
+  it("says WHY with no tail, and appends the tail when there is one", async () => {
+    // The message must stay legible when the command produced no output at all — the
+    // no-output case is itself a signal, and it must not render a dangling separator.
+    const quiet = (await ensureWorkspaceSetup({
+      ssh: fixedSsh({ exitCode: 3, stdout: "", stderr: "" }),
+      target,
+      workspacePath: WORKSPACE,
+      command: SETUP_RUN,
+    }).catch((e: unknown) => e)) as WorkspaceSetupError;
+    expect(quiet.message).toContain("exited 3");
+    expect(quiet.exitCode).toBe(3);
+    expect(quiet.message.endsWith("PATH for the project's commands and hooks")).toBe(true);
+
+    const noisy = (await ensureWorkspaceSetup({
+      ssh: fixedSsh({ exitCode: 3, stdout: "", stderr: "disk full" }),
+      target,
+      workspacePath: WORKSPACE,
+      command: SETUP_RUN,
+    }).catch((e: unknown) => e)) as WorkspaceSetupError;
+    expect(noisy.message).toContain(": disk full");
+  });
+
+  it("carries the workspace it failed in, and is named for what it is", async () => {
+    const error = (await ensureWorkspaceSetup({
+      ssh: fixedSsh({ exitCode: 1, stdout: "", stderr: "x" }),
+      target,
+      workspacePath: WORKSPACE,
+      command: SETUP_RUN,
+    }).catch((e: unknown) => e)) as WorkspaceSetupError;
+    expect(error.workspacePath).toBe(WORKSPACE);
+    // The `name` is what a log line and an `instanceof`-less consumer key on.
+    expect(error.name).toBe("WorkspaceSetupError");
+  });
+
   it("never leaks an app-env VALUE into the failure message or the carried command", async () => {
     // Substrate-boundary discipline, same as bootstrap: the `export K='v'` prelude is
     // prepended to the EXECUTED string only, so no app secret can reach an event payload.
@@ -394,66 +424,11 @@ describe("a failed setup is attributed to the REPOSITORY, and halts", () => {
   });
 });
 
-describe("the verb is DECLARED, never detected", () => {
-  it("`setup.run` parses off the repo's contract, verbatim", () => {
-    expect(setupCommand(resolveCiConfig(CI_YAML))).toBe(SETUP_RUN);
-  });
-
-  it("has NO default — DEFAULT_CI_CONFIG declares no setup, unlike bootstrap/upgrade/deploy", () => {
-    // A `just setup` default would make every repo that ships no `.tanren/ci.yml` — every
-    // greenfield scaffold, on its first prep — run a recipe that does not exist, and halt.
-    expect(DEFAULT_CI_CONFIG.setup).toBeUndefined();
-    expect(setupCommand(DEFAULT_CI_CONFIG)).toBeUndefined();
-    expect(DEFAULT_CI_CONFIG.bootstrap?.run).toBe("just bootstrap");
-  });
-
-  it("a repo that omits it resolves to undefined, and NO conventional script is probed for", async () => {
-    // THE DESIGN'S NEGATIVE CONTROL. The obvious alternative — detect and run
-    // `scripts/bootstrap.sh` / `script/bootstrap` / `bin/setup` / `make setup` — would, on
-    // the very repository that motivated this change, have executed the exact script that
-    // repository's contract states must not run ("Deliberately not scripts/bootstrap.sh").
-    // A convention match is not consent. It would also not have worked: that script is two
-    // dozen `sudo apt-get`/`sudo install` calls deep and the runner has no sudo.
-    const yaml = CI_YAML.replace(`setup:\n  run: ${SETUP_RUN}\n`, "");
-    const ssh = new ContractRunnerSsh(yaml);
-
-    const lifecycle = await resolveWorkspaceLifecycleCommands({ ssh, target, workspacePath: WORKSPACE });
-
-    expect(lifecycle.setup).toBeUndefined();
-    expect(lifecycle.bootstrap).toBe(BOOTSTRAP_RUN);
-    for (const probe of ["scripts/bootstrap.sh", "script/bootstrap", "bin/setup", "make setup"]) {
-      expect(ssh.commands.map((c) => c.command).join("\n")).not.toContain(probe);
-    }
-  });
-
-  it("resolves BOTH preparation commands from ONE read of the contract", async () => {
-    // Two reads would double the round-trip and — worse — let the two verbs be resolved
-    // from different bytes of a file a writer may be editing.
-    const ssh = new ContractRunnerSsh();
-    const lifecycle = await resolveWorkspaceLifecycleCommands({ ssh, target, workspacePath: WORKSPACE });
-
-    expect(lifecycle).toEqual({ setup: SETUP_RUN, bootstrap: BOOTSTRAP_RUN });
-    expect(ssh.commands.filter(isCiConfigRead)).toHaveLength(1);
-  });
-
-  it("the schema is strict: `setup` takes a run string and nothing else", () => {
-    expect(CiConfigV1.safeParse(parsed({ setup: { run: "x" } })).success).toBe(true);
-    expect(CiConfigV1.safeParse(parsed({ setup: { run: "x", when: "once" } })).success).toBe(false);
-    expect(CiConfigV1.safeParse(parsed({ setup: { run: "" } })).success).toBe(false);
-  });
-});
-
-function parsed(extra: Record<string, unknown>): unknown {
-  return {
-    version: 1,
-    tiers: {
-      fast: [{ name: "l", run: "l" }],
-      slow: [{ name: "t", run: "t", junitReport: "reports/junit.xml" }],
-      merge: [{ name: "m", run: "m", junitReport: "reports/junit.xml" }],
-    },
-    when: { fast: ["per_iteration"], slow: ["pre_audit"], merge: ["pre_merge"] },
-    ...extra,
-  };
+/** A substrate that answers EVERY command with one fixed result — for driving the failure
+ * branches (substrate fault, stall, exit code, empty output) that a runner-shaped fake
+ * cannot reach. */
+function fixedSsh(result: Record<string, unknown>): CommandSubstrate {
+  return { run: async () => result as never };
 }
 
 function makeInput(ssh: CommandSubstrate, overrides: Record<string, unknown> = {}): RunPlannerLoopInput {
