@@ -3,12 +3,18 @@
 // file-length ceiling; the subject is the same command builder.
 
 import { describe, expect, it } from "vitest";
-import { MISE_LOCK_SLICE_SECONDS, MISE_LOCK_WAIT_SECONDS, miseRunScope } from "../src/engine/ssh/miseActivate.js";
+import {
+  MISE_LOCK_SLICE_SECONDS,
+  MISE_LOCK_WAIT_SECONDS,
+  miseRunScope,
+  withMiseActivation,
+} from "../src/engine/ssh/miseActivate.js";
 import { detectToolchainRequirements } from "../src/engine/workspace/toolchainDeclarations.js";
 import {
   classifyToolchainFault,
   NO_DECLARATION_NOTICE,
   toolchainProvisionCommand,
+  toolchainRetractionCommand,
   WorkspaceToolchainUnavailableError,
 } from "../src/engine/workspace/toolchainProvision.js";
 
@@ -134,5 +140,33 @@ describe("classifyToolchainFault · a declared tool is matched by its BINARY, no
     expect(fault).toBeInstanceOf(WorkspaceToolchainUnavailableError);
     expect(fault?.message).toContain("'cargo' WAS declared, but Tanren could not turn that declaration");
     expect(fault?.message).not.toContain("Declare 'cargo' in one of those files");
+  });
+});
+
+describe("ensureWorkspaceDepsInstalled · a RETRACTED toolchain is gone before the activation reads for it", () => {
+  it("emits the retraction AHEAD of the activation prelude, not inside the command it wraps", () => {
+    // THE ORDERING HOLE. `withMiseActivation` prepends its prelude to everything it wraps,
+    // so a retraction living inside the guarded command runs too late: the prelude's
+    // `mise env` has already read the marker an earlier gate left and put a tool this
+    // detection no longer names on PATH, and the bootstrap chained after it inherits that
+    // PATH in the same shell. A writer who deletes `.nvmrc` mid-run stayed gated on the
+    // node they removed.
+    const scope = miseRunScope(RUN_A);
+    const retraction = toolchainRetractionCommand(detectToolchainRequirements([]), RUN_A);
+    expect(retraction).toBe(`rm -f "${scope.markerFile}" "${scope.configFile}"`);
+
+    const wrapped = `${retraction}; ${withMiseActivation("just bootstrap", RUN_A)}`;
+    // The removal precedes the prelude's test for the very file it removes.
+    expect(wrapped.indexOf("rm -f")).toBeLessThan(wrapped.indexOf(`[ -f "${scope.markerFile}" ]`));
+    expect(wrapped.indexOf("rm -f")).toBeLessThan(wrapped.indexOf("mise env"));
+  });
+
+  it("emits NOTHING to retract when this gate did detect a toolchain", () => {
+    // The provision rewrites both files in that case, so a removal would be a race with it.
+    expect(toolchainRetractionCommand(detectToolchainRequirements(MAINSTREAM_DECLARATIONS), RUN_A)).toBe("");
+    // …and a repo that owns its own mise.toml has neither file under Tanren's management.
+    expect(toolchainRetractionCommand(detectToolchainRequirements([{ path: "mise.toml", contents: "" }]), RUN_A)).toBe(
+      "",
+    );
   });
 });

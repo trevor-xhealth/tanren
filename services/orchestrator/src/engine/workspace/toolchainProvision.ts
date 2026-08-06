@@ -89,6 +89,24 @@ export function toolchainSpec(requirement: ToolchainRequirement): string {
  * When there is nothing to provision it emits a stated no-op line rather than a
  * fabricated success, so the run timeline records what Tanren concluded about the repo.
  */
+/**
+ * The marker + config RETRACTION for a detection that names nothing provisionable.
+ *
+ * Exported rather than inlined because WHERE it runs matters as much as what it does.
+ * `withMiseActivation` prepends its prelude to the WHOLE command it wraps, so at the per-gate
+ * door that prelude's `mise env` reads the marker BEFORE a retraction embedded in the same
+ * command could remove it, leaving the retracted toolchain on PATH. That caller emits this
+ * AHEAD of the activation; workspace-prep, which runs unwrapped, keeps it in sequence.
+ *
+ * Empty when there IS something to provision (the provision rewrites both files) or when the
+ * repo owns its `mise.toml`. `rm -f`, so a run that never provisioned is unaffected.
+ */
+export function toolchainRetractionCommand(detection: ToolchainDetection, workspacePath: string): string {
+  if (detection.deferToMiseConfig || detection.requirements.length > 0) return "";
+  const scope = miseRunScope(workspacePath);
+  return `rm -f "${scope.markerFile}" "${scope.configFile}"`;
+}
+
 export function toolchainProvisionCommand(detection: ToolchainDetection, workspacePath: string): string {
   if (detection.deferToMiseConfig) {
     // The repo's OWN mise config outranks anything Tanren could read from its
@@ -114,7 +132,7 @@ export function toolchainProvisionCommand(detection: ToolchainDetection, workspa
     // mid-run would still be gated on the node it removed. Retracting the marker is what
     // turns `withMiseActivation` back into the no-op it is for a repo that declares
     // nothing. `rm -f` so a run that never provisioned is unaffected.
-    parts.push(`rm -f "${scope.markerFile}" "${scope.configFile}"`);
+    parts.push(toolchainRetractionCommand(detection, workspacePath));
     // Only claim "nothing was declared" when nothing was: with unhonored declarations
     // the lines above already said what was found and why it could not be provisioned.
     if (detection.unresolved.length === 0) parts.push(echo(NO_DECLARATION_NOTICE));
@@ -363,22 +381,6 @@ export class WorkspaceToolchainUnavailableError extends Error {
 }
 
 /**
- * Classify a failed deps-install as an infrastructure fault, or return `undefined` to
- * leave it on the writer-routable path.
- *
- * DELIBERATELY NARROW. It fires on exactly two conditions, and only when the shell
- * actually named a missing binary:
- *   - the binary is one Tanren knows how to provision from a declaration (`pnpm`, `uv`,
- *     `go`, `cargo`, …) — so "your bootstrap needs a toolchain nobody declared";
- *   - or the binary is one the repo DID declare and Tanren could NOT honor (an
- *     unresolved declaration naming that tool) — the repo asked, Tanren could not
- *     deliver, and no writer can close that gap either.
- *
- * A missing `vitest`/`tsc`/project script is NOT claimed: those really are scaffold
- * defects the writer can fix by declaring the dependency, and they keep their existing
- * route into the loop.
- */
-/**
  * Did the repository DECLARE the tool this binary belongs to, in a declaration Tanren could
  * not honor?
  *
@@ -394,6 +396,22 @@ function declaresBinary(detection: ToolchainDetection, binary: string): boolean 
   return detection.unresolved.some((u) => u.tool !== undefined && (u.tool === binary || toolBinary(u.tool) === binary));
 }
 
+/**
+ * Classify a failed deps-install as an infrastructure fault, or return `undefined` to
+ * leave it on the writer-routable path.
+ *
+ * DELIBERATELY NARROW. It fires on exactly two conditions, and only when the shell
+ * actually named a missing binary:
+ *   - the binary is one Tanren knows how to provision from a declaration (`pnpm`, `uv`,
+ *     `go`, `cargo`, …) — so "your bootstrap needs a toolchain nobody declared";
+ *   - or the binary is one the repo DID declare and Tanren could NOT honor (an
+ *     unresolved declaration naming that tool) — the repo asked, Tanren could not
+ *     deliver, and no writer can close that gap either.
+ *
+ * A missing `vitest`/`tsc`/project script is NOT claimed: those really are scaffold
+ * defects the writer can fix by declaring the dependency, and they keep their existing
+ * route into the loop.
+ */
 export function classifyToolchainFault(input: {
   workspacePath: string;
   command: string;

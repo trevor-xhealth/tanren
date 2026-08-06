@@ -12,7 +12,12 @@ import { withAppEnv } from "../ssh/appEnvPrelude.js";
 import { withMiseActivation } from "../ssh/miseActivate.js";
 import { buildActivityWatchdog } from "../ssh/activityWatchdog.js";
 import { combinedOutput, failureReason, tailOf } from "./outputTail.js";
-import { classifyToolchainFault, resolveWorkspaceToolchain, toolchainProvisionCommand } from "./toolchainProvision.js";
+import {
+  classifyToolchainFault,
+  resolveWorkspaceToolchain,
+  toolchainProvisionCommand,
+  toolchainRetractionCommand,
+} from "./toolchainProvision.js";
 import { parseToolchainResolutions, type ToolchainResolution } from "./toolchainEnforcement.js";
 import { runWorkspaceSshCommand } from "./ssh.js";
 
@@ -279,7 +284,19 @@ export async function ensureWorkspaceDepsInstalled(
     // installs under the project's declared toolchain — a no-op when none declared),
     // THEN prepend the app-env prelude. Both on the EXECUTED string only; the error
     // command stays the ORIGINAL (prelude-free). Codex never runs through this path.
-    command: withMiseActivation(withAppEnv(guarded, input.appEnv), input.workspacePath),
+    //
+    // RETRACTION RUNS BEFORE THE ACTIVATION, and the order is the whole point.
+    // `withMiseActivation` prepends its prelude to everything it wraps, so a retraction
+    // living INSIDE the guarded command happens too late: the prelude's `mise env` has
+    // already read the marker left by an earlier gate and put a tool this detection no
+    // longer names on PATH, and the bootstrap chained after it inherits that PATH in the
+    // same shell. A writer who deletes `.nvmrc` mid-run would still be gated on the node
+    // they removed. Emitting the retraction ahead of the wrapper is what makes the marker
+    // absent by the time the prelude tests for it.
+    command: withRetraction(
+      toolchainRetractionCommand(detection, input.workspacePath),
+      withMiseActivation(withAppEnv(guarded, input.appEnv), input.workspacePath),
+    ),
     cwd: input.workspacePath,
     // VCS/build op: output-driven + the workspace as the silent-stretch liveness
     // probe (the install writes files as it works). NEVER killed for elapsed time.
@@ -468,4 +485,9 @@ function bootstrapFailureMessage(
 ): string {
   const tail = outputTail === "" ? "" : `: ${outputTail}`;
   return `workspace bootstrap (${command}) ${failureReason(exitCode, stalled)}${tail}`;
+}
+
+/** Chain a retraction ahead of an activation-wrapped command. Empty retraction ⇒ unchanged. */
+function withRetraction(retraction: string, activated: string): string {
+  return retraction === "" ? activated : `${retraction}; ${activated}`;
 }

@@ -401,6 +401,25 @@ describe("ensureWorkspaceDepsInstalled (greenfield deps-ensure)", () => {
     expect(typed.message).toContain("Declare 'pnpm'");
   });
 
+  it("returns the toolchain each declared tool RESOLVED to for this gate", async () => {
+    // `EnsureWorkspaceDepsResult.toolchain` is how "which version actually ran" leaves the
+    // per-gate door. Nothing covered it: a regression that dropped the field, or parsed the
+    // wrong stream, would have passed this suite while the gate reported an empty toolchain.
+    const ssh = new ScriptedSsh([
+      { exitCode: 0, stdout: "", stderr: "" },
+      {
+        exitCode: 0,
+        stdout: "tanren: deps-ensure installing\n===TANREN-TOOLCHAIN-IN-EFFECT:node|24|24.18.1|.nvmrc|pinned===\n",
+        stderr: "",
+      },
+    ]);
+    const result = await ensureWorkspaceDepsInstalled({ ssh, target, workspacePath, command: "just bootstrap" });
+    expect(result.installed).toBe(true);
+    expect(result.toolchain).toEqual([
+      { tool: "node", declared: "24", resolved: "24.18.1", declaredIn: ".nvmrc", versionDeclared: true },
+    ]);
+  });
+
   it("a FAILED declaration probe halts — it is never read as `this repo declares nothing`", async () => {
     // The original defect in miniature: concluding "no toolchain" from something that
     // was not actually a clean read is how a silent skip becomes a downstream exit 127.

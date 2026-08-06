@@ -330,8 +330,18 @@ describe("withMiseActivation · the provisioned toolchain reaches the project's 
 
 describe("classifyToolchainFault · a missing binary is INFRA, not a writer finding", () => {
   const detection = detectToolchainRequirements([]);
+  // `stalled` is REQUIRED on the input. Omitting it left `input.stalled` as `undefined` —
+  // falsy, so every assertion still passed while the suite silently exercised only the
+  // not-stalled branch and never said so. Passing it explicitly names the branch under test.
   const fault = (outputTail: string, d = detection): WorkspaceToolchainUnavailableError | undefined =>
-    classifyToolchainFault({ workspacePath, command: "just bootstrap", exitCode: 127, outputTail, detection: d });
+    classifyToolchainFault({
+      workspacePath,
+      command: "just bootstrap",
+      exitCode: 127,
+      outputTail,
+      stalled: false,
+      detection: d,
+    });
 
   it.each([
     ["sh: 1: pnpm: not found", "pnpm"],
