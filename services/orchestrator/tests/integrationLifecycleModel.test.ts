@@ -303,7 +303,18 @@ describe("IN-1 P1 integration lifecycle schema contract", () => {
     ];
     for (const name of exports) expect(schemas).toContain(`export const ${name} = pgTable(`);
     for (const path of schemaPaths) {
-      expect((await readFile(path, "utf8")).split("\n").length).toBeLessThanOrEqual(500);
+      // Count lines the way the cap this mirrors counts them. `scripts/check-architecture.mjs`
+      // (`file-line-max-500`) discounts the trailing newline; a bare `split("\n").length` counts
+      // the empty string after it, so this asserted a silent 499 for every file in the repo (they
+      // all end in a newline) and disagreed with the gate it exists to mirror. `schemaCore.ts` is
+      // 499 real lines, read as 500 here — one byte from a failure that would have been wrong.
+      // It DID fail under Stryker, whose sandbox copy carries an extra trailing newline, and the
+      // response was to exclude this suite from every mutation run in `vitest.stryker.config.ts`.
+      // Counting correctly fixes the cause, so that exclusion is gone and `stryker.full.mjs` keeps
+      // this suite's coverage of `createProjectRoutes` (#1420 review, P3).
+      const text = await readFile(path, "utf8");
+      const lineCount = text.endsWith("\n") ? text.split("\n").length - 1 : text.split("\n").length;
+      expect(lineCount).toBeLessThanOrEqual(500);
     }
     expect(schemas).not.toContain("schemaIntegrationLifecycle");
   });

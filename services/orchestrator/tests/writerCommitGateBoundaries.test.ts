@@ -6,9 +6,11 @@
 //   1. Only a HOOK VERDICT is recoverable. `runWorkspaceSshCommand` throws for three
 //      different reasons and only one of them is the project rendering a judgment; a
 //      substrate fault, a watchdog stall, or a failure of the STAGING step means the hook
-//      never ran at all. Re-telling any of those as "your work is bad" would send the writer
-//      chasing a defect that is not in its diff, burning iterations against a condition it
-//      cannot fix.
+//      never ran at all. Nor did it run when GIT ITSELF could not perform the commit — no
+//      author identity, a held index.lock, a signing key it could not use — which git
+//      reports with its own fatal exit 128 while normalizing every hook rejection to 1.
+//      Re-telling any of those as "your work is bad" would send the writer chasing a defect
+//      that is not in its diff, burning iterations against a condition it cannot fix.
 //   2. A rejection rides only the arm it describes — never a timeout/crash/window_exhausted.
 //   3. Tanren's own hard-coded commit messages are preflighted under live hooks BEFORE any
 //      writer runs, so a repo that refuses them halts as configuration, not as writer rework.
@@ -148,6 +150,74 @@ describe("only a HOOK VERDICT is recoverable — infrastructure faults stay fata
     const gated = ssh.commands.find((c) => isCommit(c.command));
     expect(gated?.command).not.toContain("git add");
     expect(gated?.command).toContain("git diff --cached --quiet --exit-code");
+  });
+
+  it("GIT'S OWN failure at the commit is not a verdict — exit 128 stays fatal", () => {
+    // #1420 review, the residual the staging split did not reach. Splitting `git add -A` out
+    // guaranteed only the COMMIT's exit reaches the classifier — necessary, but `git commit`
+    // itself fails for reasons no hook is involved in, and those arrived wearing the identical
+    // shape (`failure === undefined`, not stalled, nonzero exit). The writer was told "the
+    // project's own pre-commit gate REJECTED your work" for a missing `user.email` and burned
+    // iterations against a condition no edit to its diff can reach.
+    //
+    // The discriminator is git's OWN exit code, and it exists because git NORMALIZES a hook
+    // rejection. Measured on git 2.50.1: a pre-commit hook and a commit-msg hook exiting
+    // 1/2/3/42/128/255 all produce `git commit` exit 1 — git reports its own code, never the
+    // hook's. Git's operational failures all `die()` with 128. Each stderr below is the
+    // verbatim first line git emitted in that measurement.
+    for (const stderr of [
+      "fatal: empty ident name (for <>) not allowed",
+      "fatal: Unable to create '/workspace/.git/index.lock': File exists.",
+      "error: gpg failed to sign the data:",
+      "fatal: not a git repository (or any of the parent directories): .git",
+    ]) {
+      const error = new WorkspaceCommandError(
+        "boom",
+        "commit codex workspace changes",
+        result({ exitCode: 128, stderr }),
+      );
+      expect(classifyCommitRejection(error)).toBeUndefined();
+    }
+  });
+
+  it("but an unrecognized nonzero exit still reaches the writer — the rule is ONE-SIDED", () => {
+    // Deliberate asymmetry, and the reason the guard excludes 128 rather than requiring 1.
+    // Being wrong in the excluding direction re-throws and kills the run — reinstating the
+    // exact run-killer this module removes — so anything not positively identified as git
+    // failing keeps its benefit of the doubt and is fed back as steering.
+    const label = "commit codex workspace changes";
+    for (const exitCode of [1, 2, 3, 42, 127, 255]) {
+      const rejection = classifyCommitRejection(
+        new WorkspaceCommandError("boom", label, result({ exitCode, stdout: CSPELL_STDOUT })),
+      );
+      expect(rejection?.exitCode).toBe(exitCode);
+    }
+  });
+
+  it("end to end: a commit git itself could not perform THROWS rather than steering the writer", async () => {
+    // The whole point, from the caller's side. Pre-fix this returned a `CommitRejection` and
+    // `captureGitStateAfterCodex` resolved, so the loop steered the writer to fix its diff
+    // over an unset `user.email`. It must surface as the workspace fault it is.
+    class NoIdentitySsh implements CommandSubstrate {
+      async run(_t: RunnerHandle, command: RunnerCommand): Promise<CommandResult> {
+        if (isCommit(command.command)) {
+          return {
+            exitCode: 128,
+            stdout: "",
+            stderr: "fatal: empty ident name (for <>) not allowed",
+            timedOut: false,
+          };
+        }
+        return { exitCode: 0, stdout: "", stderr: "", timedOut: false };
+      }
+    }
+
+    await expect(captureGitStateAfterCodex(new NoIdentitySsh(), target, WORKSPACE, BASELINE_SHA)).rejects.toThrow(
+      "commit codex workspace changes failed",
+    );
+    await expect(
+      captureGitStateAfterWriter(new NoIdentitySsh(), target, WORKSPACE, BASELINE_SHA, "claude writer"),
+    ).rejects.toThrow("commit writer workspace changes failed");
   });
 
   it("classifies the writer's exitReason from the presence of a rejection", () => {

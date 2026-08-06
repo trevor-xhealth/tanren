@@ -24,15 +24,17 @@ import baseConfig from "./vitest.config.ts";
 // 15+ runs fail). The whitelist stays Stryker-agnostic and the test is excluded
 // from the mutation run only, matching the gen-dashboard-types doctrine. The
 // real repo tree is still gated by the normal `just`/CI suite.
-// `integrationLifecycleModel.test.ts`'s `keeps all schema exports aligned and
-// under the architecture line cap` case asserts each `db/src/schema*.ts` is
-// `split("\n").length <= 500`. `db/src/schemaCore.ts` sits at EXACTLY 500 in the
-// real tree; Stryker's sandbox copy re-writes the file with a trailing newline,
-// making the split length 501 and failing the initial (un-mutated) dry run before
-// any mutant is tested. Environmental to the sandbox — it mutates no source and
-// the real tree is still gated by `scripts/check-architecture.mjs` plus the normal
-// `just`/CI suite — so it is excluded from the mutation run only, matching the two
-// exclusions above.
+// NOTE ON WHAT IS *NOT* EXCLUDED HERE (#1420 review, P3). This file is shared by
+// EVERY `stryker.*.mjs` entrypoint, so an exclusion added for one scoped cluster
+// silently applies to `stryker.full.mjs` too — which mutates all of
+// `services/orchestrator/src/**` and therefore loses that suite's kill power across
+// the whole weekly trend. `integrationLifecycleModel.test.ts` was excluded here for
+// a sandbox line-count failure; it exercises `createProjectRoutes`, so route mutants
+// would have quietly stopped being killed. The failure was not environmental after
+// all — the suite counted lines one higher than the `file-line-max-500` gate it
+// mirrors — so it is fixed at the assertion and the suite stays in every run. Prefer
+// that shape: fix the assertion, and only exclude when the failure is genuinely a
+// property of the sandbox and nothing else.
 export default mergeConfig(baseConfig, {
   test: {
     exclude: [
@@ -44,7 +46,6 @@ export default mergeConfig(baseConfig, {
       "reports/**",
       "**/scripts/gen-dashboard-types.test.ts",
       "**/scripts/lint/env-read-whitelist.test.ts",
-      "**/tests/integrationLifecycleModel.test.ts",
     ],
   },
 });

@@ -21,7 +21,7 @@
 // the SAME convergence budget, converging to the usual loud P0 fixed point if it cannot be
 // satisfied. No new retry budget, no commit retry, no weakening of the hook.
 import { describe, expect, it } from "vitest";
-import type { CommitRejection, WriterAdapter, WriterResult } from "../src/engine/providers/types.js";
+import type { CommitRejection } from "../src/engine/providers/types.js";
 import { captureGitStateAfterCodex } from "../src/engine/providers/codexGit.js";
 import { captureGitStateAfterWriter } from "../src/engine/providers/writerGit.js";
 import { COMMIT_REJECTION_OUTPUT_LIMIT, commitRejectionOutput } from "../src/engine/providers/writerCommitGate.js";
@@ -47,45 +47,9 @@ import {
   HookRejectsSsh,
   WORKSPACE,
   WRITER_DIFF,
+  makeCommitGateWriter,
   target,
 } from "./helpers/commitGateFixtures.js";
-
-/**
- * A scripted writer that can report a commit the project's hook rejected. Local to this
- * file rather than added to `makeScriptedWriter`: that shared helper sits exactly at the
- * 500-line architecture cap, and this fixture is only meaningful for the commit-gate path.
- *
- * A rejected commit lands NO commit — `git add -A` succeeded and only `git commit` was
- * refused — but the work stays in the tree, so the diff is non-empty while `commits` is
- * empty. The loop keys its convergence work signature off that diff.
- */
-function makeCommitGateWriter(
-  script: ReadonlyArray<{ diff: string; exitReason: WriterResult["exitReason"]; rejection?: CommitRejection }>,
-): WriterAdapter & { calls: Array<{ prompt: string }> } {
-  let index = 0;
-  const calls: Array<{ prompt: string }> = [];
-  return {
-    kind: "writer",
-    cli: "fake",
-    authRef: "managed:codex:default",
-    calls,
-    async runWriter(opts): Promise<WriterResult> {
-      calls.push({ prompt: opts.prompt });
-      const entry = script[index] ?? script.at(-1) ?? { diff: "", exitReason: "completed" as const };
-      index += 1;
-      return {
-        diff: entry.diff,
-        commits:
-          entry.diff === "" || entry.exitReason === "commit_rejected"
-            ? []
-            : [{ sha: `sha_${index}`, message: `subtask ${index}` }],
-        exitReason: entry.exitReason,
-        ...(entry.rejection === undefined ? {} : { commitRejection: entry.rejection }),
-        telemetry: { rawEventCount: 1 },
-      };
-    },
-  };
-}
 
 describe("the project's commit gate reaches the writer instead of killing the run", () => {
   it("codexGit: a rejected commit comes back as a VALUE carrying the hook output, not a throw", async () => {
@@ -191,7 +155,8 @@ describe("the steering handed to the writer", () => {
     // dangling "Commit gate output:" header with nothing under it.
     const withExit = commitRejectionReason({ label: "l", exitCode: 3, output: "" });
     expect(withExit).toContain("(exit 3)");
-    expect(withExit).not.toContain("Commit gate output:");
+    expect(withExit).not.toContain("Commit gate output follows.");
+    expect(withExit).not.toContain("BEGIN COMMIT GATE OUTPUT");
 
     // A rejection the caller could not supply — the steering must still stand alone.
     const absent: CommitRejection | undefined = undefined;
@@ -200,7 +165,7 @@ describe("the steering handed to the writer", () => {
     // exit code it does not have, and a substring ban would also fire on any future wording
     // that merely contains those four letters ("existing", "exit criteria").
     expect(noRejection.split("\n")[0]).toBe("the project's own pre-commit gate REJECTED your work");
-    expect(noRejection).not.toContain("Commit gate output:");
+    expect(noRejection).not.toContain("Commit gate output follows.");
   });
 
   it("tells the writer what the gate IS and where to fix it", () => {
@@ -226,7 +191,13 @@ describe("the steering handed to the writer", () => {
 
     expect(lines[0]).toBe("the project's own pre-commit gate REJECTED your work (exit 1)");
     expect(lines[1]?.startsWith("This is the project's declared quality bar")).toBe(true);
-    expect(lines.slice(2)).toEqual(["Commit gate output:", "one", "two"]);
+    // The hook's output is FENCED as untrusted data (see writerCommitGateInjection.test.ts):
+    // an untrusted-data warning, then a BEGIN marker, the output verbatim, an END marker.
+    expect(lines[2]?.startsWith("Commit gate output follows.")).toBe(true);
+    expect(lines[3]?.startsWith("--- BEGIN COMMIT GATE OUTPUT ")).toBe(true);
+    expect(lines.slice(4, 6)).toEqual(["one", "two"]);
+    expect(lines[6]?.startsWith("--- END COMMIT GATE OUTPUT ")).toBe(true);
+    expect(lines).toHaveLength(7);
   });
 
   it("keeps the anti-evasion clauses that make a green gate mean something", () => {
@@ -237,7 +208,7 @@ describe("the steering handed to the writer", () => {
     expect(reason).toContain("never remove or disable a hook");
     expect(reason).toContain("never weaken a rule merely to silence");
     expect(reason).toContain("A hook that ran and passed is evidence; a hook that was skipped is not.");
-    expect(reason).toContain("Commit gate output:\nnope");
+    expect(reason).toContain("\nnope\n");
   });
 
   it("still permits the fix a human maintainer would actually make", () => {

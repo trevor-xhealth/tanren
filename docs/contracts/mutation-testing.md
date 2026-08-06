@@ -23,26 +23,34 @@ Each cluster is a `stryker.<name>.mjs` config that mutates a disjoint slice of
 `services/orchestrator/src/**` (the DAL cluster also reaches `db/src/orgScope.ts`).
 The clusters are disjoint so they can be measured and ratcheted independently.
 
-| Cluster    | Config                | Scope (mutated)                                                       | Baseline    | `break` |
-| ---------- | --------------------- | --------------------------------------------------------------------- | ----------- | ------- |
-| core       | `stryker.config.mjs`  | planner/checker/auditor, credentials, seam contracts, allocators      | 39.89%¹     | 42      |
-| runloop    | `stryker.runloop.mjs` | `engine/workflow/**` run-loop stages                                  | 81.99%      | 0²      |
-| alloc      | `stryker.alloc.mjs`   | `engine/allocators/**` + allocator contract                           | 84.03%      | 82      |
-| wf         | `stryker.wf.mjs`      | `subtaskStages.ts` + `subtaskCost.ts`                                 | 91.33%      | 90      |
-| forge      | `stryker.forge.mjs`   | `engine/forge/**` conversation + write-approval                       | 82.28%      | 80      |
-| notify     | `stryker.notify.mjs`  | `engine/notifications/**` channels + dispatch                         | 87.04%      | 85      |
-| secrets    | `stryker.secrets.mjs` | SecretStore seam + GCP/AWS/1Password/Vault backends                   | 95.96%      | 95      |
-| inbox      | `stryker.inbox.mjs`   | `engine/forge/inbox/**` source connectors + dispatcher + triage       | 83.57%      | 83      |
-| auth       | `stryker.auth.mjs`    | operator `auth/**` providers + identity store + `middleware/auth.ts`  | 78.43%      | 78      |
-| costs      | `stryker.costs.mjs`   | 4-source cost model + CostRecorder + DORA reducer + insight detectors | 87.54%      | 87      |
-| **repos**  | `stryker.repos.mjs`   | `engine/repositories/**` state stores                                 | **84.62%**  | 84      |
-| **worker** | `stryker.worker.mjs`  | `engine/worker/**` run executor + reaper + boot                       | **70.95%**  | 69      |
-| **dal**    | `stryker.dal.mjs`     | `engine/data/**` + `db/src/orgScope.ts` org-scope seam                | **97.78%³** | 97      |
+| Cluster     | Config                    | Scope (mutated)                                                       | Baseline    | `break` |
+| ----------- | ------------------------- | --------------------------------------------------------------------- | ----------- | ------- |
+| core        | `stryker.config.mjs`      | planner/checker/auditor, credentials, seam contracts, allocators      | 39.89%¹     | 42      |
+| runloop     | `stryker.runloop.mjs`     | `engine/workflow/**` run-loop stages                                  | 81.99%      | 0²      |
+| alloc       | `stryker.alloc.mjs`       | `engine/allocators/**` + allocator contract                           | 84.03%      | 82      |
+| wf          | `stryker.wf.mjs`          | `subtaskStages.ts` + `subtaskCost.ts`                                 | 91.33%      | 90      |
+| forge       | `stryker.forge.mjs`       | `engine/forge/**` conversation + write-approval                       | 82.28%      | 80      |
+| notify      | `stryker.notify.mjs`      | `engine/notifications/**` channels + dispatch                         | 87.04%      | 85      |
+| secrets     | `stryker.secrets.mjs`     | SecretStore seam + GCP/AWS/1Password/Vault backends                   | 95.96%      | 95      |
+| inbox       | `stryker.inbox.mjs`       | `engine/forge/inbox/**` source connectors + dispatcher + triage       | 83.57%      | 83      |
+| auth        | `stryker.auth.mjs`        | operator `auth/**` providers + identity store + `middleware/auth.ts`  | 78.43%      | 78      |
+| costs       | `stryker.costs.mjs`       | 4-source cost model + CostRecorder + DORA reducer + insight detectors | 87.54%      | 87      |
+| **repos**   | `stryker.repos.mjs`       | `engine/repositories/**` state stores                                 | **84.62%**  | 84      |
+| **worker**  | `stryker.worker.mjs`      | `engine/worker/**` run executor + reaper + boot                       | **70.95%**  | 69      |
+| **dal**     | `stryker.dal.mjs`         | `engine/data/**` + `db/src/orgScope.ts` org-scope seam                | **97.78%³** | 97      |
+| commit-gate | `stryker.commit-gate.mjs` | `providers/writerCommitGate.ts` + `workflow/commitGateSteering.ts`    | 97.67%⁴     | 97      |
 
 ¹ Core's full-scope number is a Stryker scoping artifact (planner/checker/auditor
 read 0% in the aggregate run); measured in isolation via `runloop` they score
 ~82%. ² `runloop` has `break: 0` because its members overlap the `core` scope's
-ratchet. ³ DB-free measurement — see the backend note below.
+ratchet. ³ DB-free measurement — see the backend note below. ⁴ 84 killed, 2
+survived, 86 mutants: `commitGateSteering.ts` 100% (32/32), `writerCommitGate.ts`
+96.30% (52/54). Both survivors are the `buildActivityWatchdog({…})` argument in
+`stageWorkspaceChanges`, which no test seam observes. The cluster mutates only the
+two commit-gate helper modules — NOT the adapters (`writerGit.ts` / `codexGit.ts`)
+or the routing (`writerStage.ts` / `subtaskInnerLoop.ts`) that carry a rejection to
+the writer — so its score is a statement about the classification seam and the
+steering text, not about the recovery feature as a whole (#1420 review).
 
 The **bold** clusters (repos / worker / dal) are the **refactor-target backend**:
 the DAL / repositories / run-executor layer slated for the RLS +
@@ -89,7 +97,7 @@ Measured on branch `ci/scheduled-mutation-and-backend-baseline`, DB-free
 
 ```sh
 just mutation                 # original high-value scope (stryker.config.mjs)
-just mutation-cluster repos   # one cluster (repos|worker|dal|alloc|wf|forge|notify|secrets|inbox|auth|costs|runloop)
+just mutation-cluster repos   # one cluster (repos|worker|dal|alloc|wf|forge|notify|secrets|inbox|auth|costs|runloop|commit-gate)
 just mutation-full            # WHOLE orchestrator backend — slow; weekly job
 ```
 

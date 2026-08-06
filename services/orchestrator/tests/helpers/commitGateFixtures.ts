@@ -5,6 +5,7 @@
  */
 import type { CommandResult, CommandSubstrate, RunnerCommand } from "../../src/engine/contracts/commandSubstrate.js";
 import { type RunnerHandle, sshRunnerHandle } from "../../src/engine/contracts/allocator.js";
+import type { CommitRejection, WriterAdapter, WriterResult } from "../../src/engine/providers/types.js";
 
 // Built through the SSH constructor rather than annotated `RunnerHandle`. `RunnerHandle`
 // declares ONLY `backend` — the reach fields are `SshRunnerHandle`'s — so a bare literal is an
@@ -38,6 +39,45 @@ export const HUSKY_STDERR = [
 
 export function isCommit(command: string): boolean {
   return /git (?:-c [^ ]+ )?commit /u.test(command);
+}
+
+/**
+ * A scripted writer that can report a commit the project's hook rejected. Shared here
+ * rather than added to `makeScriptedWriter`: that helper sits exactly at the 500-line
+ * architecture cap, and this fixture is only meaningful for the commit-gate path. Used by
+ * `writerCommitGateRecovery.test.ts` and `writerCommitGateInjection.test.ts`, which need the
+ * SAME loop harness to compare a benign rejection against a poisoned one.
+ *
+ * A rejected commit lands NO commit — `git add -A` succeeded and only `git commit` was
+ * refused — but the work stays in the tree, so the diff is non-empty while `commits` is
+ * empty. The loop keys its convergence work signature off that diff.
+ */
+export function makeCommitGateWriter(
+  script: ReadonlyArray<{ diff: string; exitReason: WriterResult["exitReason"]; rejection?: CommitRejection }>,
+): WriterAdapter & { calls: Array<{ prompt: string }> } {
+  let index = 0;
+  const calls: Array<{ prompt: string }> = [];
+  return {
+    kind: "writer",
+    cli: "fake",
+    authRef: "managed:codex:default",
+    calls,
+    async runWriter(opts): Promise<WriterResult> {
+      calls.push({ prompt: opts.prompt });
+      const entry = script[index] ?? script.at(-1) ?? { diff: "", exitReason: "completed" as const };
+      index += 1;
+      return {
+        diff: entry.diff,
+        commits:
+          entry.diff === "" || entry.exitReason === "commit_rejected"
+            ? []
+            : [{ sha: `sha_${index}`, message: `subtask ${index}` }],
+        exitReason: entry.exitReason,
+        ...(entry.rejection === undefined ? {} : { commitRejection: entry.rejection }),
+        telemetry: { rawEventCount: 1 },
+      };
+    },
+  };
 }
 
 /** A substrate whose project pre-commit hook rejects the writer's commit, cspell-style. */
