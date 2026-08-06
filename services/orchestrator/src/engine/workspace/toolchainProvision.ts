@@ -36,6 +36,7 @@ import {
 import {
   detectToolchainRequirements,
   provisionableBinaries,
+  toolBinary,
   TOOLCHAIN_CONTENT_DECLARATION_PATHS,
   TOOLCHAIN_PRESENCE_DECLARATION_PATHS,
   type ToolchainDetection,
@@ -107,6 +108,13 @@ export function toolchainProvisionCommand(detection: ToolchainDetection, workspa
     parts.push(echo(`tanren: toolchain declaration NOT honored - ${path} ${reason}`));
   }
   if (detection.requirements.length === 0) {
+    // NOTHING DECLARED NOW MEANS NOTHING ACTIVE. Detection is redone every gate, and the
+    // config + marker are per-RUN, so an earlier gate's provision would otherwise keep
+    // activating tools this detection no longer names — a writer who deletes `.nvmrc`
+    // mid-run would still be gated on the node it removed. Retracting the marker is what
+    // turns `withMiseActivation` back into the no-op it is for a repo that declares
+    // nothing. `rm -f` so a run that never provisioned is unaffected.
+    parts.push(`rm -f "${scope.markerFile}" "${scope.configFile}"`);
     // Only claim "nothing was declared" when nothing was: with unhonored declarations
     // the lines above already said what was found and why it could not be provisioned.
     if (detection.unresolved.length === 0) parts.push(echo(NO_DECLARATION_NOTICE));
@@ -140,8 +148,15 @@ export function toolchainProvisionCommand(detection: ToolchainDetection, workspa
   parts.push(
     underMiseLock(
       scope,
-      `{ [ -f "${scope.configFile}" ] || : > "${scope.configFile}"; } && ` +
-        `mise trust "${scope.configFile}" && mise use --global ${specs}`,
+      // TRUNCATE, never append. `mise use --global` ADDS to the config it is pointed at
+      // (removal is `--remove`), and the config is per-RUN, not per-gate: detection is
+      // redone every gate on purpose, so a writer who drops `.nvmrc` — or moves from
+      // `pnpm + node` to `pnpm` alone — leaves the previous gate's entry behind. The
+      // marker then keeps `mise env` putting a tool the repository NO LONGER DECLARES on
+      // PATH, which is the same "gated against a version nobody asked for" this PR halts
+      // on, arriving by the back door. `: >` makes the config say exactly what THIS
+      // detection says and nothing else.
+      `: > "${scope.configFile}" && mise trust "${scope.configFile}" && mise use --global ${specs}`,
     ),
   );
   // `eval "$(…)"` reports the status of `eval`, NEVER of the command substitution: a
@@ -177,14 +192,6 @@ function describeRequirements(requirements: readonly ToolchainRequirement[]): st
     .join(", ");
 }
 
-function missingBinaryMessage(requirement: ToolchainRequirement): string {
-  return (
-    `tanren: toolchain provision FAILED - ${requirement.declaredIn} declares ` +
-    `${toolchainSpec(requirement)} but the '${requirement.bin}' binary is still not on PATH after ` +
-    `'mise use --global'. The declared toolchain could not be provisioned on this runner.`
-  );
-}
-
 function markerWriteFailedMessage(markerFile: string): string {
   return (
     `tanren: toolchain provision FAILED - could not write the provisioned marker (${markerFile}). Without it no ` +
@@ -194,6 +201,10 @@ function markerWriteFailedMessage(markerFile: string): string {
 
 function echo(message: string): string {
   return `printf '%s\\n' ${quoteSshShellArg(message)}`;
+}
+
+function echoErr(message: string): string {
+  return `printf '%s\\n' ${quoteSshShellArg(message)} >&2`;
 }
 
 // ---- Execution ------------------------------------------------------------------
@@ -367,6 +378,22 @@ export class WorkspaceToolchainUnavailableError extends Error {
  * defects the writer can fix by declaring the dependency, and they keep their existing
  * route into the loop.
  */
+/**
+ * Did the repository DECLARE the tool this binary belongs to, in a declaration Tanren could
+ * not honor?
+ *
+ * `unresolved[].tool` is a MISE TOOL NAME; the shell reports a BINARY. For most entries they
+ * are the same string, which is why comparing them directly looked right — but two entries
+ * in the catalogue differ, and they are exactly the interesting ones: `rust` → `cargo` and
+ * `python` → `python3`. A `rust-toolchain.toml` with `channel = "stable"` whose bootstrap
+ * then dies on `cargo: not found` therefore read as "you never declared cargo", and the halt
+ * told the operator to declare a tool they had already declared. Resolve the declared tool to
+ * its binary before comparing.
+ */
+function declaresBinary(detection: ToolchainDetection, binary: string): boolean {
+  return detection.unresolved.some((u) => u.tool !== undefined && (u.tool === binary || toolBinary(u.tool) === binary));
+}
+
 export function classifyToolchainFault(input: {
   workspacePath: string;
   command: string;
@@ -389,7 +416,7 @@ export function classifyToolchainFault(input: {
   if (missing === undefined) {
     return undefined;
   }
-  const declaredButUnhonored = input.detection.unresolved.some((u) => u.tool === missing);
+  const declaredButUnhonored = declaresBinary(input.detection, missing);
   if (!declaredButUnhonored && !provisionableBinaries().includes(missing)) {
     return undefined;
   }
@@ -429,7 +456,7 @@ function toolchainUnavailableMessage(
       `declaration files (${[...TOOLCHAIN_CONTENT_DECLARATION_PATHS, ...TOOLCHAIN_PRESENCE_DECLARATION_PATHS].join(", ")}).`,
     `Detected here: ${declared}.${notHonored}`,
     `Toolchain actually in effect on this runner: ${describeToolchainInEffect(resolutions)}.`,
-    detection.unresolved.some((u) => u.tool === missingBinary)
+    declaresBinary(detection, missingBinary)
       ? `'${missingBinary}' WAS declared, but Tanren could not turn that declaration into a provisionable tool. ` +
         `Declare it in a mise.toml, which mise resolves directly, or make it available on the runner image.`
       : `Declare '${missingBinary}' in one of those files — or in a mise.toml — and the run can proceed.`,

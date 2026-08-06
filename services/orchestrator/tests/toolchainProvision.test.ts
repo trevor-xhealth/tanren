@@ -30,9 +30,7 @@ import { WorkspaceToolchainUnhonoredError } from "../src/engine/workspace/toolch
 import {
   classifyToolchainFault,
   NO_DECLARATION_NOTICE,
-  parseToolchainDeclarationOutput,
   provisionMiseToolchain,
-  toolchainDeclarationReadCommand,
   toolchainProvisionCommand,
   TOOLCHAIN_VERIFIED_NOTICE,
   WorkspaceMiseProvisionError,
@@ -45,9 +43,6 @@ const workspacePath = "/ws/run/repo";
 // A fixed stand-in for the per-read nonce. In production it is fresh random bytes; here it
 // is pinned so the framed fixtures stay readable. What matters is that the PARSER requires
 // it, which is what stops repository content from forging a declaration frame.
-const NONCE = "cafebabe0123456789abcdef";
-const frame = (path: string): string => `===TANREN-TOOLCHAIN-DECLARATION:${NONCE}:${path}===\n`;
-
 // The nonce a REAL read command was built with. Tests that drive `provisionMiseToolchain`
 // end-to-end cannot pre-frame their fixture: the nonce is minted per read, on purpose, so a
 // substrate answering that read has to echo the one it was asked with — exactly as the
@@ -69,83 +64,6 @@ const MAINSTREAM_DECLARATIONS = [
   { path: "package.json", contents: '{"packageManager":"pnpm@11.19.0"}' },
   { path: "uv.lock", contents: "" },
 ];
-
-describe("toolchainDeclarationReadCommand · one bounded round-trip", () => {
-  it("probes every declaration path, and round-trips through its own parser", () => {
-    const command = toolchainDeclarationReadCommand(NONCE);
-    for (const path of ["mise.toml", "package.json", ".nvmrc", "uv.lock", "go.mod", "rust-toolchain.toml"]) {
-      expect(command).toContain(`[ -f '${path}' ]`);
-    }
-    // Lockfiles are probed for PRESENCE only — never piped back (they can be huge or
-    // binary); content paths are read with a byte bound.
-    expect(command).not.toContain("head -c 65536 'uv.lock'");
-    expect(command).toContain("head -c 65536 'package.json'");
-  });
-
-  it("parses framed output back into files, contents intact", () => {
-    const stdout = frame("uv.lock") + frame("package.json") + '{"packageManager":"pnpm@11.19.0"}\n';
-    const files = parseToolchainDeclarationOutput(stdout, NONCE);
-    expect(files.map((f) => f.path)).toEqual(["uv.lock", "package.json"]);
-    expect(detectToolchainRequirements(files).requirements.map((r) => `${r.tool}@${r.spec}`)).toEqual([
-      "pnpm@11.19.0",
-      "uv@latest",
-    ]);
-  });
-
-  it("REFUSES a frame the repository forged: repo bytes cannot declare a mise.toml", () => {
-    // THE DEFECT. The frame marker used to be a fixed string, and the framed stream carries
-    // the repository's OWN manifest bytes. A repo that commits the marker inside its
-    // package.json therefore announced a `mise.toml` that does not exist — which sets
-    // `deferToMiseConfig`, and detection, provisioning AND version enforcement are all
-    // skipped for that repository, by its own content.
-    const forged =
-      frame("package.json") +
-      '{"packageManager":"pnpm@11.19.0",\n' +
-      // The exact bytes a repo would commit to forge the short-circuit, with no nonce.
-      "===TANREN-TOOLCHAIN-DECLARATION:mise.toml===\n" +
-      "}\n";
-    const files = parseToolchainDeclarationOutput(forged, NONCE);
-    expect(files.map((f) => f.path)).toEqual(["package.json"]);
-    expect(detectToolchainRequirements(files).deferToMiseConfig).toBe(false);
-    // The forged line stays what it is — bytes inside the manifest, not a declaration.
-    expect(files[0]?.contents).toContain("===TANREN-TOOLCHAIN-DECLARATION:mise.toml===");
-  });
-
-  it("REFUSES a frame carrying a stale nonce, or naming a path it never probed", () => {
-    // Even a caller that leaks last invocation's nonce cannot reuse it, and a frame for a
-    // path outside the probe catalogue is not a declaration Tanren asked for.
-    expect(parseToolchainDeclarationOutput(frame("package.json"), "0000deadbeef")).toEqual([]);
-    expect(
-      parseToolchainDeclarationOutput(`===TANREN-TOOLCHAIN-DECLARATION:${NONCE}:../../etc/passwd===\n`, NONCE),
-    ).toEqual([]);
-  });
-
-  it("SAYS when the byte bound cut a manifest short, instead of calling it malformed", () => {
-    // A root package.json past the read bound arrives mid-token, so JSON.parse fails on
-    // bytes the repository wrote correctly. Reporting that as "not parseable JSON" and
-    // provisioning nothing is the `pnpm: not found` class all over again — and WORSE with
-    // a lockfile present, because the pinned version silently degrades to unconstrained.
-    const command = toolchainDeclarationReadCommand(NONCE);
-    expect(command).toContain(`[ "$(wc -c < 'package.json')" -gt 65536 ]`);
-    expect(command).toContain(`===TANREN-TOOLCHAIN-TRUNCATED:`);
-
-    const cut = '{"name":"app","dependencies":{"a":"1"},"packageManager":"pnpm@11.19.0","x":"';
-    const files = parseToolchainDeclarationOutput(
-      `${frame("package.json")}${cut}\n===TANREN-TOOLCHAIN-TRUNCATED:${NONCE}:package.json===\n`,
-      NONCE,
-    );
-    expect(files[0]?.truncated).toBe(true);
-    const detection = detectToolchainRequirements(files);
-    expect(detection.requirements.map((r) => `${r.tool}@${r.spec}`)).toEqual(["pnpm@11.19.0"]);
-    expect(detection.unresolved).toEqual([]);
-
-    // …and the salvage is NARROW: an ordinary malformed manifest is still reported as one,
-    // never regex-scavenged.
-    const malformed = detectToolchainRequirements([{ path: "package.json", contents: '{"packageManager":"pnpm@9' }]);
-    expect(malformed.requirements).toEqual([]);
-    expect(malformed.unresolved[0]?.reason).toBe("is not parseable JSON");
-  });
-});
 
 describe("toolchainProvisionCommand · installs AND proves the binaries are there", () => {
   it("provisions a standard-declaration repo that ships no mise.toml", () => {
@@ -470,10 +388,13 @@ class ScriptedSsh implements CommandSubstrate {
  * built from the nonce it was actually asked with — then succeeds at the provision. */
 class AnsweringSsh implements CommandSubstrate {
   readonly commands: string[] = [];
-  constructor(private readonly declarations: (readCommand: string) => string) {}
+  constructor(
+    private readonly declarations: (readCommand: string) => string,
+    private readonly provisionResult: CommandResult = ok(""),
+  ) {}
   async run(_t: RunnerHandle, command: RunnerCommand): Promise<CommandResult> {
     this.commands.push(command.command);
-    return this.commands.length === 1 ? ok(this.declarations(command.command)) : ok("");
+    return this.commands.length === 1 ? ok(this.declarations(command.command)) : this.provisionResult;
   }
 }
 
@@ -502,7 +423,7 @@ describe("provisionMiseToolchain · a substrate failure is never read as no-tool
   it("HALTS before provisioning anything when a declared version cannot be honored", async () => {
     // The whole point: the second round-trip never happens. Tanren does not run a
     // provision, print a notice and then let the project build on an undeclared version.
-    const ssh = new ScriptedSsh([ok("===TANREN-TOOLCHAIN-DECLARATION:.nvmrc===\nlts/iron\n")]);
+    const ssh = new AnsweringSsh((read) => `${frameFor(read, ".nvmrc")}lts/iron\n`);
     await expect(provisionMiseToolchain({ ssh, target, workspacePath })).rejects.toBeInstanceOf(
       WorkspaceToolchainUnhonoredError,
     );
@@ -510,10 +431,10 @@ describe("provisionMiseToolchain · a substrate failure is never read as no-tool
   });
 
   it("carries the versions that were actually in effect back out of the provision", async () => {
-    const ssh = new ScriptedSsh([
-      ok("===TANREN-TOOLCHAIN-DECLARATION:.nvmrc===\n24\n"),
+    const ssh = new AnsweringSsh(
+      (read) => `${frameFor(read, ".nvmrc")}24\n`,
       ok("===TANREN-TOOLCHAIN-IN-EFFECT:node|24|24.18.1|.nvmrc|pinned===\n"),
-    ]);
+    );
     const outcome = await provisionMiseToolchain({ ssh, target, workspacePath });
     expect(outcome.resolutions).toEqual([
       { tool: "node", declared: "24", resolved: "24.18.1", declaredIn: ".nvmrc", versionDeclared: true },

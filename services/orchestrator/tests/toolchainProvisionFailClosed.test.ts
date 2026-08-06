@@ -7,6 +7,7 @@ import { MISE_LOCK_SLICE_SECONDS, MISE_LOCK_WAIT_SECONDS, miseRunScope } from ".
 import { detectToolchainRequirements } from "../src/engine/workspace/toolchainDeclarations.js";
 import {
   classifyToolchainFault,
+  NO_DECLARATION_NOTICE,
   toolchainProvisionCommand,
   WorkspaceToolchainUnavailableError,
 } from "../src/engine/workspace/toolchainProvision.js";
@@ -88,5 +89,50 @@ describe("classifyToolchainFault · a STALL is a liveness fault, never a missing
     expect(classifyToolchainFault({ ...shared, exitCode: 127, stalled: false })).toBeInstanceOf(
       WorkspaceToolchainUnavailableError,
     );
+  });
+});
+
+describe("toolchainProvisionCommand · this gate's config says what THIS gate detected", () => {
+  const scope = miseRunScope(RUN_A);
+
+  it("TRUNCATES the per-run config before adding, so a dropped declaration is really dropped", () => {
+    // `mise use --global` is ADDITIVE (removal is `--remove`), and the config is per-RUN
+    // while detection is per-GATE. A writer who deletes `.nvmrc` mid-run left the previous
+    // gate's `node` entry in place, and the marker kept `mise env` putting it on PATH — the
+    // repo gated against a tool it no longer declares, which is the same defect this PR
+    // halts on, arriving by the back door.
+    const command = toolchainProvisionCommand(detectToolchainRequirements(MAINSTREAM_DECLARATIONS), RUN_A);
+    expect(command).toContain(`: > "${scope.configFile}" && mise trust "${scope.configFile}"`);
+    expect(command).not.toContain(`[ -f "${scope.configFile}" ] ||`);
+  });
+
+  it("RETRACTS the marker when this gate detects nothing at all", () => {
+    // Nothing declared now must mean nothing active. Left alone, the marker from an earlier
+    // gate keeps activating a toolchain the current detection does not name.
+    const command = toolchainProvisionCommand(detectToolchainRequirements([]), RUN_A);
+    expect(command).toContain(`rm -f "${scope.markerFile}" "${scope.configFile}"`);
+    expect(command).toContain(NO_DECLARATION_NOTICE);
+  });
+});
+
+describe("classifyToolchainFault · a declared tool is matched by its BINARY, not its tool name", () => {
+  it("recognizes `cargo` as the binary of a declared-but-unhonored `rust`", () => {
+    // `unresolved[].tool` is a mise TOOL name; the shell reports a BINARY. They differ for
+    // exactly the two interesting entries — rust→cargo, python→python3 — so a
+    // `rust-toolchain.toml` the operator DID declare produced a halt telling them to declare
+    // it.
+    const detection = detectToolchainRequirements([{ path: "rust-toolchain.toml", contents: 'channel = "stable"\n' }]);
+    expect(detection.unresolved[0]?.tool).toBe("rust");
+    const fault = classifyToolchainFault({
+      workspacePath,
+      command: "just bootstrap",
+      exitCode: 127,
+      outputTail: "sh: 1: cargo: not found",
+      stalled: false,
+      detection,
+    });
+    expect(fault).toBeInstanceOf(WorkspaceToolchainUnavailableError);
+    expect(fault?.message).toContain("'cargo' WAS declared, but Tanren could not turn that declaration");
+    expect(fault?.message).not.toContain("Declare 'cargo' in one of those files");
   });
 });

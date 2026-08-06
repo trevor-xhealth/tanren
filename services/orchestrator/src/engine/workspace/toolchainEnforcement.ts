@@ -146,7 +146,7 @@ export function toolchainVerificationParts(requirement: ToolchainRequirement): s
     `[ -n "$__tanren_bin" ] || { ${echoErr(missingBinaryMessage(requirement))}; exit 1; }`,
     `__tanren_provisioned="$(mise which ${q(bin)} 2>/dev/null || true)"`,
     `[ "$__tanren_bin" = "$__tanren_provisioned" ] || ` +
-      `{ ${echoErrWith(shadowedMessage(requirement))} "$__tanren_bin"; exit 1; }`,
+      `{ ${echoErrWith(shadowedMessage(requirement), '"$__tanren_bin"')}; exit 1; }`,
     `__tanren_version="$(mise current ${q(tool)} 2>/dev/null | head -n 1 | tr -d '[:space:]')"`,
     `[ -n "$__tanren_version" ] || { ${echoErr(unresolvedMessage(requirement))}; exit 1; }`,
   ];
@@ -156,7 +156,7 @@ export function toolchainVerificationParts(requirement: ToolchainRequirement): s
     // `241.0.0` — the boundary is a dot, never a character.
     parts.push(
       `case "$__tanren_version" in ${q(spec)}|${q(`${spec}.`)}*) : ;; ` +
-        `*) ${echoErrWith(mismatchMessage(requirement))} "$__tanren_version"; exit 1 ;; esac`,
+        `*) ${echoErrWith(mismatchMessage(requirement), '"$__tanren_version"')}; exit 1 ;; esac`,
     );
   }
   parts.push(
@@ -236,9 +236,14 @@ function echoErr(message: string): string {
   return `printf '%s\\n' ${quoteSshShellArg(message)} >&2`;
 }
 
-// The variant whose message ends in a colon: the caller appends the OBSERVED value as a
-// second printf argument, so what was actually there is reported alongside what was asked
-// for — the operator never has to infer it.
-function echoErrWith(message: string): string {
-  return `printf '%s %s\\n' ${quoteSshShellArg(message)} >&2`;
+// The variant whose message ends in a colon: the OBSERVED value is reported alongside what
+// was asked for, so the operator never has to infer it.
+//
+// The value is passed IN rather than appended by the caller. Appended, the expansion was
+// `printf '%s %s\n' 'msg' >&2 "$value"` — a redirection sitting between two arguments.
+// POSIX accepts it and it works, but it reads as though the value belongs to the
+// redirection, and any future reorder silently drops either the value or the `>&2` with no
+// error. The helper now owns the whole word order.
+function echoErrWith(message: string, valueExpression: string): string {
+  return `printf '%s %s\\n' ${quoteSshShellArg(message)} ${valueExpression} >&2`;
 }

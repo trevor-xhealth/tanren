@@ -17,7 +17,7 @@ import {
   parseToolchainResolutions,
   WorkspaceToolchainUnhonoredError,
 } from "../src/engine/workspace/toolchainEnforcement.js";
-import { WorkspaceMiseProvisionError } from "../src/engine/workspace/toolchainProvision.js";
+import { WorkspaceDepsInstallError } from "../src/engine/workspace/bootstrap.js";
 
 const workspacePath = "/ws/run/repo";
 
@@ -38,8 +38,13 @@ describe("classifyUnhonoredDeclarations · an unhonored VERSION halts; an unread
     expect(error?.message).toContain("will not proceed on an undeclared version");
     expect(error?.message).toContain("whatever version of that tool the runner image happens to carry");
     expect(error?.message).toContain("mise.toml");
-    // NOT a deps-install error: the writer-routing boundary must not claim it.
-    expect(error).not.toBeInstanceOf(WorkspaceMiseProvisionError);
+    // NOT a deps-install error: the writer-routing boundary keys on THAT class, and
+    // routing this there would ask an LLM writer to rewrite the operator's own toolchain
+    // pin. `WorkspaceMiseProvisionError` was the wrong guard — it is a SIBLING that also
+    // extends `Error` directly, so the assertion could never fail and never touched the
+    // boundary it named. `WorkspaceDepsInstallError` is the class the gate actually
+    // branches on (workflow/gate/bootstrapFailure.ts).
+    expect(error).not.toBeInstanceOf(WorkspaceDepsInstallError);
   });
 
   it("does NOT halt a repo whose declaration it simply could not read", () => {

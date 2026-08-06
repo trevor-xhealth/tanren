@@ -105,9 +105,23 @@ files above. Tanren detects the file; it never picks the versions.
 
 A LOCKFILE declares the TOOL; a version file/field declares the VERSION. A tool declared
 by a lockfile alone is provisioned unconstrained and _reported as such_ — Tanren never
-silently pins a version the project did not choose. A declaration Tanren reads but cannot
-turn into a tool it can provision (`lts/iron`, `channel = "stable"`, an unknown package
-manager) is announced in the provisioning log, never dropped.
+silently pins a version the project did not choose.
+
+A declaration Tanren reads but cannot honor splits in two, and the split is the whole
+tolerance:
+
+- **An untranslatable VERSION for a tool Tanren can provision** (`lts/iron`,
+  `channel = "stable"`, `pnpm@`) **HALTS workspace preparation, before anything is
+  provisioned.** The runner almost certainly carries _some_ copy of that tool, so
+  proceeding would gate the repository against a version nobody declared. There is nothing
+  to verify afterwards — Tanren never asked mise for anything — so this is the only point
+  at which it can be caught. Fix it at the declaration, or declare the toolchain in a
+  `mise.toml`, which mise resolves directly including its own alias forms.
+- **A declaration that identifies no provisionable tool at all** (an unparseable manifest,
+  a tool name Tanren has no binary for) is announced in the provisioning log, never
+  dropped, and execution continues. Tanren cannot claim a run is on the wrong _version_ of
+  something it never identified, and these are ordinarily writer-fixable; if the bootstrap
+  turns out to have needed that tool, the missing-binary halt below still fires.
 
 **Provisioning is verified, and a toolchain that cannot be provisioned halts.** After installing,
 Tanren asserts each declared binary resolves on `PATH` and fails with the tool, version

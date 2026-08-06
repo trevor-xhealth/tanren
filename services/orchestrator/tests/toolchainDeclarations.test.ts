@@ -226,3 +226,23 @@ describe("detectToolchainRequirements · repository bytes are KEYS, and keys are
     expect(pm.unresolved[0]?.tool).toBe("constructor");
   });
 });
+
+describe("readGoMod · a `//` comment must not silently erase the declaration", () => {
+  it("reads the directive and the toolchain line through a trailing comment", () => {
+    // go.mod comments are `//`, not `#`, and both matchers anchor at end of line. A
+    // trailing comment therefore matched neither, the candidate was dropped AND no
+    // `unresolved` entry was recorded — a Go repo read as declaring no Go, in silence.
+    const withComments = detectToolchainRequirements([
+      file("go.mod", "module example.com/app // the module path\n\ngo 1.23.4 // keep in sync with CI\n"),
+    ]);
+    expect(withComments.requirements).toEqual([
+      { tool: "go", spec: "1.23.4", bin: "go", declaredIn: "go.mod", versionDeclared: true },
+    ]);
+
+    // `toolchain` still outranks the `go` directive, comments or not.
+    const pinned = detectToolchainRequirements([
+      file("go.mod", "go 1.23.4 // language version\ntoolchain go1.24.0 // pinned by the platform team\n"),
+    ]);
+    expect(pinned.requirements.find((r) => r.tool === "go")?.spec).toBe("1.24.0");
+  });
+});

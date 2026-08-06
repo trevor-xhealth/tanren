@@ -380,7 +380,14 @@ function readToolVersions(file: ToolchainDeclarationFile, unresolved: Unresolved
 // `toolchain go1.23.4` is the effective toolchain when present; otherwise the `go`
 // directive is the declared language version.
 function readGoMod(file: ToolchainDeclarationFile): Candidate[] {
-  const lines = significantLines(file.contents);
+  // go.mod comments are `//`, not `#`, and a trailing one is legal and common
+  // (`go 1.23.4 // keep in sync with CI`). Both matchers below anchor at end of line, so
+  // without this the directive matched nothing, `readGoMod` returned no candidate AND
+  // pushed no `unresolved` entry, and the repository's Go declaration was dropped in
+  // silence — the exact failure mode this module exists to remove, in its own catalogue.
+  const lines = significantLines(file.contents)
+    .map((l) => l.replace(/\/\/.*$/u, "").trim())
+    .filter((l) => l !== "");
   const toolchain = lines.find((l) => /^toolchain\s+go\S+$/u.test(l));
   const directive = lines.find((l) => /^go\s+\S+$/u.test(l));
   const raw = toolchain?.replace(/^toolchain\s+go/u, "") ?? directive?.replace(/^go\s+/u, "");
