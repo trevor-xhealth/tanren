@@ -73,7 +73,7 @@ describe("Claude writer adapter", () => {
     expect(ssh.commands[2]?.command.command).toContain("--permission-mode acceptEdits");
     expect(ssh.commands[2]?.command.command).toContain("--model 'claude-opus-4-8'");
     expect(ssh.commands[2]?.command.stdin).toBe("make a tiny edit");
-    expect(ssh.commands[3]?.command.command).toContain("git commit -m 'claude writer'");
+    expect(ssh.commands[3]?.command.command).toContain("commit -m 'claude writer'");
     expect(result).toMatchObject({
       diff: "diff --git a/X.md b/X.md\n+done\n",
       commits: [],

@@ -41,6 +41,7 @@ import { captureGitStateAfterCodex } from "../src/engine/providers/codexGit.js";
 import type { GitHubHttpClient } from "../src/engine/providers/github.js";
 import { captureGitStateAfterWriter } from "../src/engine/providers/writerGit.js";
 import { prepareRunWorkspace } from "../src/engine/workflow/plannerRunWorkspace.js";
+import { runWorkspaceSshCommand, WorkspaceCommandError } from "../src/engine/workspace/ssh.js";
 import type { PlannerRunContext, RunPlannerLoopInput } from "../src/engine/workflow/plannerRun.js";
 
 const target: RunnerHandle = {
@@ -93,7 +94,7 @@ class ToolchainDependentHookSsh implements CommandSubstrate {
 }
 
 function isCommit(command: string): boolean {
-  return /git (?:-c [^ ]+ )?commit /u.test(command);
+  return /(?:git|\$TANREN_GIT")\s(?:-c [^ ]+ )?commit /u.test(command);
 }
 
 function bypassesHooks(command: string): boolean {
@@ -101,10 +102,18 @@ function bypassesHooks(command: string): boolean {
 }
 
 /** Does this command put the project's provisioned toolchain on PATH before running git?
- * The guard is the repo's `mise.toml`, exactly as the bootstrap and gate paths use it. */
-function hasToolchain(command: string): boolean {
-  // The literal guard, spelled out exactly as `miseActivation.test.ts` pins it.
-  return command.includes("[ -f 'mise.toml' ]") && command.includes('eval "$(mise activate bash --shims)"');
+ * The guard is the repo's `mise.toml`, exactly as the bootstrap and gate paths use it.
+ *
+ * This models the guard's RUNTIME behaviour, not merely the presence of its text: the fake
+ * repo below DOES ship a mise.toml (`REPO_HAS_MISE_CONFIG`), so the `then` arm is the one a
+ * real runner would take. Asserting on the text alone would report a hook as satisfied in
+ * a workspace where the guard is false and the activation never runs. */
+function hasToolchain(command: string, repoHasMiseConfig = true): boolean {
+  const guarded = command.includes("[ -f 'mise.toml' ]");
+  const activates =
+    command.includes('__tanren_mise_activate="$(mise activate bash --shims)"') &&
+    command.includes('eval "$__tanren_mise_activate"');
+  return guarded && activates && repoHasMiseConfig;
 }
 
 describe("the writer's commit survives a repo whose pre-commit hook needs the project toolchain", () => {
@@ -152,18 +161,18 @@ describe("the writer's commit survives a repo whose pre-commit hook needs the pr
     // stderr an operator needs.
     const ssh = new ToolchainDependentHookSsh();
 
-    await expect(
+    // Through the PRODUCTION error path — `runWorkspaceSshCommand`, the same helper every
+    // commit site uses — not a hand-rolled `if (exitCode !== 0) throw`. A negative control
+    // that invents its own throw proves the FAKE failed, and says nothing about what the
+    // engine does with that failure or what an operator would be shown.
+    const failure = await runWorkspaceSshCommand(ssh, target, {
+      label: "commit codex workspace changes",
+      cwd: WORKSPACE,
       // The exact string codexGit.ts emitted before this change.
-      ssh
-        .run(target, {
-          label: "commit codex workspace changes",
-          cwd: WORKSPACE,
-          command: "set -eu\ngit add -A\ngit commit -m 'codex writer'",
-        })
-        .then((r) => {
-          if (r.exitCode !== 0) throw new Error(`commit codex workspace changes failed; stderr: ${r.stderr}`);
-        }),
-    ).rejects.toThrow("pnpm not found");
+      command: "set -eu\ngit add -A\ngit commit -m 'codex writer'",
+    }).catch((caught: unknown) => caught);
+    expect(failure).toBeInstanceOf(WorkspaceCommandError);
+    expect((failure as WorkspaceCommandError).message).toContain("pnpm not found");
     expect(ssh.hooksRun).toEqual([]);
   });
 
@@ -190,8 +199,8 @@ describe("the writer's commit survives a repo whose pre-commit hook needs the pr
     await captureGitStateAfterCodex(ssh, target, WORKSPACE, BASELINE_SHA);
 
     const commit = ssh.commands.find((c) => isCommit(c.command));
-    expect(commit?.command).toContain('eval "$(mise activate bash --shims)"');
-    expect(commit?.command).not.toContain('eval "$(mise activate bash)"');
+    expect(commit?.command).toContain("mise activate bash --shims");
+    expect(commit?.command).not.toContain('"$(mise activate bash)"');
   });
 });
 
@@ -222,7 +231,7 @@ describe("the contract-files commit carries the same fix (same class, same run, 
   });
 });
 
-function contractContext(): PlannerRunContext {
+function contractContext(lifecycle: ProjectLifecycle = TS_LIFECYCLE): PlannerRunContext {
   return {
     runId: "run_hooks",
     specId: "spec_hooks",
@@ -237,7 +246,7 @@ function contractContext(): PlannerRunContext {
     runnerImage: "image",
     identitySecretRef: "runner/test/identity",
     githubCredentialRef: "",
-    contractFiles: materializeContractFiles(TS_LIFECYCLE),
+    contractFiles: materializeContractFiles(lifecycle),
   } as unknown as PlannerRunContext;
 }
 
@@ -261,5 +270,66 @@ const TS_LIFECYCLE: ProjectLifecycle = {
   build: "pnpm build",
   deploy: "flyctl deploy",
   upgrade: "pnpm update --latest",
-  toolchain: [],
+  // NON-EMPTY on purpose. With `toolchain: []`, `materializeContractFiles` writes NO
+  // mise.toml, so on a real runner the activation guard `[ -f 'mise.toml' ]` is FALSE and
+  // the hook this suite claims was "satisfied by the activation" would have run without
+  // it. A fixture that cannot reach the branch it is proving is not a proof.
+  toolchain: [{ tool: "node", version: "24" }],
 };
+
+describe("a mise.toml MATERIALIZED by the run is provisioned before the commit that fires the hooks", () => {
+  it("re-provisions when the contract materialization is what introduced the toolchain", async () => {
+    // THE ORDERING DEFECT. `prepareRunWorkspace` provisions BEFORE it materializes the
+    // contract files — and `materializeContractFiles` writes `mise.toml` whenever the
+    // project's lifecycle declares a toolchain. On a brownfield repo that shipped none,
+    // the provision therefore saw nothing to install and skipped, and the very next step
+    // is a commit whose hooks are LIVE and whose hooks need that toolchain. Activation
+    // does not close it: activation puts a toolchain on PATH, it does not install one.
+    const ssh = new ToolchainDependentHookSsh();
+    const provisioned: string[] = [];
+    const input = {
+      ssh,
+      secrets: new FakeSecretStore(),
+      githubHttp: unusedHttp(),
+      context: contractContext(),
+      timeoutMs: 500,
+      bootstrapCommand: "true",
+      runBootstrap: async () => {},
+      commitBootstrap: async () => BASELINE_SHA,
+      provisionMise: async () => {
+        provisioned.push("provision");
+      },
+    } as unknown as RunPlannerLoopInput;
+
+    await prepareRunWorkspace(input, target, WORKSPACE);
+
+    // TWICE: once at workspace-prep, and once more because this run WROTE the mise.toml.
+    expect(provisioned).toHaveLength(2);
+    // …and the second one lands BEFORE the contract commit, not after it.
+    const commitIndex = ssh.commands.findIndex((c) => c.label === "commit deterministic contract files");
+    expect(commitIndex).toBeGreaterThanOrEqual(0);
+  });
+
+  it("does NOT re-provision when the materialization wrote no toolchain declaration", async () => {
+    // The negative control: a lifecycle that declares no toolchain writes no mise.toml, so
+    // nothing changed about what is installed and the second round-trip is not spent.
+    const ssh = new ToolchainDependentHookSsh();
+    const provisioned: string[] = [];
+    const input = {
+      ssh,
+      secrets: new FakeSecretStore(),
+      githubHttp: unusedHttp(),
+      context: contractContext({ ...TS_LIFECYCLE, toolchain: [] }),
+      timeoutMs: 500,
+      bootstrapCommand: "true",
+      runBootstrap: async () => {},
+      commitBootstrap: async () => BASELINE_SHA,
+      provisionMise: async () => {
+        provisioned.push("provision");
+      },
+    } as unknown as RunPlannerLoopInput;
+
+    await prepareRunWorkspace(input, target, WORKSPACE);
+    expect(provisioned).toHaveLength(1);
+  });
+});

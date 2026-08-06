@@ -20,6 +20,7 @@ import {
   withMiseActivation,
 } from "../src/engine/ssh/miseActivate.js";
 import { buildCodexAnswererExecCommand, buildCodexExecCommand } from "../src/engine/providers/codexExecCommand.js";
+import { TANREN_BIN_ENV, workspaceToolBinDir } from "../src/engine/ssh/workspaceToolPath.js";
 
 // Two concurrent runs on the ONE static runner container, as the SAME unix user — the
 // posture the whole per-run-scope change exists for.
@@ -32,7 +33,12 @@ describe("withMiseActivation · the PROJECT-command path is mise-activated", () 
     // SHIMS / non-interactive activation: `--shims` emits a plain POSIX
     // `export PATH="…/shims:$PATH"` that IMMEDIATELY puts the toolchain on PATH for the
     // rest of the `bash -c`/`sh -c` command. This is the crux of the fix.
-    expect(wrapped).toContain('eval "$(mise activate bash --shims)"');
+    // The activation's STATUS is checked before its output is evaluated: `eval "$(…)"`
+    // reports eval's status, so a `mise activate` that died evaluated to an empty string
+    // and "succeeded", leaving the project's command to run without its declared toolchain.
+    expect(wrapped).toContain('__tanren_mise_activate="$(mise activate bash --shims)"');
+    expect(wrapped).toContain('eval "$__tanren_mise_activate"');
+    expect(wrapped).toContain("toolchain activation FAILED");
     // NOT the bare/hook mode: `mise activate bash` (no `--shims`) installs an INTERACTIVE
     // precmd/chpwd hook that never fires for a non-interactive `bash -c`, and its bash-only
     // syntax `eval`s to an error under a `sh`/dash project shell — so PATH is never set and
@@ -45,6 +51,29 @@ describe("withMiseActivation · the PROJECT-command path is mise-activated", () 
     expect(wrapped).toContain("MISE_YES=1");
     // The project's own command still runs AFTER the prelude (verbatim, at the tail).
     expect(wrapped.endsWith("pnpm install")).toBe(true);
+  });
+
+  it("exports the run-scoped TOOL DIRECTORY and puts it on PATH BENEATH the mise prelude", () => {
+    // `withMiseActivation` is the single entry point at which BOTH halves of the project
+    // environment are applied — the declared mise toolchain and `$TANREN_BIN`, the writable
+    // run-scoped bin a repository's own `setup.run` installs native binaries into. A
+    // command that got one half and not the other is the bug class this suite exists for,
+    // and this file asserted only the mise half.
+    const wrapped = withMiseActivation("pnpm install", RUN_A);
+    expect(wrapped).toContain(`export ${TANREN_BIN_ENV}="${workspaceToolBinDir(RUN_A)}"`);
+    expect(wrapped).toContain(`export PATH="${workspaceToolBinDir(RUN_A)}:$PATH"`);
+    // PRECEDENCE, and it is a pure string property so it is cheap to pin here: the tool
+    // directory is prepended FIRST, so the mise prelude's own prepend lands on top of it
+    // and a version the repository actually DECLARED always outranks a same-named binary
+    // its setup happened to drop in the tool dir.
+    expect(wrapped.indexOf(TANREN_BIN_ENV)).toBeLessThan(wrapped.indexOf("mise activate"));
+  });
+
+  it("scopes the tool directory per RUN, exactly as it scopes the mise config", () => {
+    // A shared `~/.local/bin` across three runs in one container is the cross-run
+    // contamination the per-run mise config exists to prevent, wearing a different hat.
+    expect(withMiseActivation("pnpm install", RUN_B)).not.toContain("run_alpha");
+    expect(workspaceToolBinDir(RUN_A)).not.toBe(workspaceToolBinDir(RUN_B));
   });
 
   it("is a no-op-shaped guard — a no-toolchain project's command runs even with no mise.toml", () => {

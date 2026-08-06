@@ -37,6 +37,7 @@ export {
 // barrel via bootstrapFailure.js, so this adds no new module-graph edge for callers).
 export { DEFAULT_BOOTSTRAP_COMMAND, ensureWorkspaceDepsInstalled } from "../../workspace/bootstrap.js";
 export { advisoryStepNamesForPosture } from "./advisoryGate.js";
+export { resolveLifecycleContract, type LifecycleContract } from "./gateLifecycleContract.js";
 export { runNativeMergeGate } from "./runMergeGate.js";
 export { publishGateVerdict, type PublishGateVerdictInput } from "./publishGateVerdict.js";
 export { publishGateVerdictBestEffort, type EmitPublishFailed } from "./publishGateVerdictBestEffort.js";

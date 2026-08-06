@@ -64,7 +64,7 @@ describe("opencode writer adapter", () => {
     expect(ssh.commands[2]?.command.command).toContain(`--model '${ZAI_GLM_MODEL}'`);
     expect(ssh.commands[2]?.command.command).toContain("--cwd '/workspace/repo'");
     expect(ssh.commands[2]?.command.stdin).toBe("make a tiny edit");
-    expect(ssh.commands[3]?.command.command).toContain("git commit -m 'opencode writer'");
+    expect(ssh.commands[3]?.command.command).toContain("commit -m 'opencode writer'");
     expect(writer.cli).toBe("opencode");
     expect(result).toMatchObject({
       diff: "diff --git a/Y.md b/Y.md\n+done\n",

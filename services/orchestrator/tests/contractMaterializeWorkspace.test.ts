@@ -175,7 +175,16 @@ describe("prepareRunWorkspace · materializes + commits the contract files when 
     );
     expect(commit).toBeDefined();
     const commitCommand = (commit?.command as { command: string } | undefined)?.command ?? "";
-    expect(commitCommand).toContain("git add '.tanren/ci.yml' 'justfile'");
+    expect(commitCommand).toContain("add '.tanren/ci.yml' 'justfile'");
+    // TANREN'S OWN GIT, resolved before the project's shims go on PATH. Only the HOOK
+    // needed the project's toolchain; a project that declares `git` must not also decide
+    // which binary writes Tanren's commit or prints the sha that becomes the review base.
+    expect(commitCommand).toContain('TANREN_GIT="$(command -v git 2>/dev/null || true)"');
+    expect(commitCommand).toContain(`"$TANREN_GIT" add`);
+    expect(commitCommand).toContain(`"$TANREN_GIT" rev-parse HEAD`);
+    // The commit's own stdout goes to STDERR: `-q` silences git, not the repo's live
+    // pre-commit hook, and hook chatter on stdout would be read as the commit sha.
+    expect(commitCommand).toMatch(/commit -q -m '[^']*' >&2/u);
   });
 
   it("is a clean no-op when the run carries NO contract manifest (brownfield ships its own)", async () => {

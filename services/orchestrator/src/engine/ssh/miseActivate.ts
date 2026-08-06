@@ -326,11 +326,35 @@ function lockedBodyFailedMessage(scope: MiseRunScope): string {
 // runs on the container is what let run B's toolchain be activated for run A's gate.
 function miseActivationPrelude(workspacePath: string): string {
   const scope = miseRunScope(workspacePath);
+  // `eval "$(…)"` reports the status of EVAL, never of the command substitution inside it:
+  // a `mise activate` / `mise env` that exited nonzero evaluates to an EMPTY string and
+  // "succeeds", so the project's command runs with its declared toolchain absent and the
+  // only evidence is a line on stderr. That is the silent degradation this module exists to
+  // remove, sitting inside the module. Captured, CHECKED, then evaluated.
+  //
+  // A failure here is a HALT, not a skip. Both branches are entered only after the guard
+  // has established that this run HAS a toolchain to activate — the repo's own `mise.toml`,
+  // or a marker written by a provision that verified every declared binary. Running the
+  // project's command anyway would run it against whatever the image happens to carry. The
+  // guard is still a pure skip for a repo that declared nothing: that path enters neither
+  // branch and the `if … fi; ` chains straight into the command, exactly as before.
+  const activate = (source: string): string =>
+    `__tanren_mise_activate="$(${source})" || ` +
+    `{ printf '%s\\n' ${quoteSshShellArg(activationFailedMessage(source))} >&2; exit 1; }; ` +
+    `eval "$__tanren_mise_activate"`;
   return (
     `if [ -f ${quoteSshShellArg(MISE_CONFIG_REL_PATH)} ]; then ` +
-    `${miseScopeExport(scope)}; eval "$(mise activate bash --shims)"; ` +
+    `${miseScopeExport(scope)}; ${activate("mise activate bash --shims")}; ` +
     `elif [ -f "${scope.markerFile}" ]; then ` +
-    `${miseScopeExport(scope)}; eval "$(mise env -s bash)"; fi; `
+    `${miseScopeExport(scope)}; ${activate("mise env -s bash")}; fi; `
+  );
+}
+
+function activationFailedMessage(source: string): string {
+  return (
+    `tanren: toolchain activation FAILED - '${source}' exited nonzero, so the toolchain this run provisioned is ` +
+    `not on PATH. Tanren halts rather than running the project's own command against whatever toolchain the ` +
+    `runner image happens to carry.`
   );
 }
 
@@ -399,8 +423,33 @@ export function withMiseActivation(command: string, workspacePath: string): stri
  * so they are left for a change that can prove itself the way this one does.
  */
 export function withProjectHookToolchain(command: string, workspacePath: string): string {
-  return withMiseActivation(command, workspacePath);
+  // TANREN'S OWN GIT IS PINNED BEFORE THE PROJECT'S TOOLCHAIN GOES ON PATH.
+  //
+  // Branch 1 of the activation prepends the project's mise SHIMS directory, which carries a
+  // shim for every tool in the runner's mise store — including `git`, if the project
+  // declared one. Only the HOOK needed the project's PATH; Tanren's own `git add` /
+  // `git commit` / `git rev-parse` were swept along with it, so a project-pinned or broken
+  // git could stop Tanren committing at all, and the sha `git rev-parse` prints — the
+  // writer's diff base — would come from a binary the project chose. Resolving it FIRST,
+  // into an exported absolute path the call sites name explicitly, keeps the two apart:
+  // Tanren's git stays the harness's, the hook subprocess still inherits the project's
+  // PATH, and every call site says which of the two it is using.
+  //
+  // Falls back to the bare word when `command -v` finds nothing, so a substrate with no git
+  // fails exactly the way it always did rather than in a new and less legible way.
+  const pinGit =
+    `${TANREN_GIT_ENV}="$(command -v git 2>/dev/null || true)"; ` +
+    `[ -n "$${TANREN_GIT_ENV}" ] || ${TANREN_GIT_ENV}=git; export ${TANREN_GIT_ENV}; `;
+  return `${pinGit}${withMiseActivation(command, workspacePath)}`;
 }
+
+/** The environment variable carrying the HARNESS git, resolved BEFORE any project
+ * activation. See {@link withProjectHookToolchain}. */
+export const TANREN_GIT_ENV = "TANREN_GIT";
+
+/** How a Tanren-issued git command spells `git` when it runs under
+ * {@link withProjectHookToolchain}. */
+export const TANREN_GIT = `"$${TANREN_GIT_ENV}"`;
 
 // The mise PROVISIONING commands run at workspace-prep, BEFORE the project's bootstrap,
 // when a `mise.toml` is present: `mise trust` (mise's config-trust security gate — the

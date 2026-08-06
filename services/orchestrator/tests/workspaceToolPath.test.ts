@@ -155,7 +155,7 @@ describe("$TANREN_BIN is on PATH wherever the project's own code runs", () => {
     const ssh = new ContractRunnerSsh();
     await captureGitStateAfterCodex(ssh, target, WORKSPACE, HEAD_SHA);
 
-    const commit = ssh.commands.find((c) => /git (?:-c [^ ]+ )?commit /u.test(c.command));
+    const commit = ssh.commands.find((c) => /(?:git|\$TANREN_GIT")\s(?:-c [^ ]+ )?commit /u.test(c.command));
     expect(commit?.command).toContain(`export ${TANREN_BIN_ENV}="${workspaceToolBinDir(WORKSPACE)}"`);
     expect(commit?.command).toContain(`export PATH="${workspaceToolBinDir(WORKSPACE)}:$PATH"`);
     // And it is still not a hook bypass — the point is that the hook RUNS and PASSES.

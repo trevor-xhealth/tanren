@@ -90,7 +90,7 @@ import { withMiseActivation } from "../ssh/miseActivate.js";
 import { workspaceScopePrefix } from "../ssh/workspaceScope.js";
 import { TANREN_BIN_ENV, workspaceToolBinDir } from "../ssh/workspaceToolPath.js";
 import { buildActivityWatchdog } from "../ssh/activityWatchdog.js";
-import { combinedOutput, failureReason, tailOf } from "./outputTail.js";
+import { combinedOutput, failureReason, redactAppEnv, tailOf } from "./outputTail.js";
 
 /** The success latch for a workspace's setup. Per-workspace, outside the repo tree. */
 export function workspaceSetupMarkerFile(workspacePath: string): string {
@@ -114,8 +114,9 @@ export interface EnsureWorkspaceSetupInput {
   command?: string;
   // Plane B: the project's dev+test app env. Same SUBSTRATE-BOUNDARY handling as
   // bootstrap.ts — the `export K='v'; …` prelude is prepended to the EXECUTED command
-  // ONLY, never to `command`, so a failure surfaces the ORIGINAL command and no
-  // app-secret value can reach the error message or an emitted event payload.
+  // ONLY, never to `command`, so a failure surfaces the ORIGINAL command. The OUTPUT is a
+  // separate exposure and a separate mechanism: the repository's own setup script can echo
+  // a value, so the captured tail is redacted (`redactAppEnv`) before it reaches the error.
   appEnv?: Record<string, string>;
 }
 
@@ -195,7 +196,10 @@ export async function ensureWorkspaceSetup(input: EnsureWorkspaceSetupInput): Pr
       input.workspacePath,
       command,
       result.exitCode,
-      tailOf(combinedOutput(result)),
+      // REDACTED (./outputTail.ts): the prelude discipline keeps app-env values out of the
+      // `command`, but the repository's own setup script can PRINT one, and this tail is
+      // pasted into the error message and every event that carries it.
+      redactAppEnv(tailOf(combinedOutput(result)), input.appEnv),
       result.stalled === true,
     );
   }

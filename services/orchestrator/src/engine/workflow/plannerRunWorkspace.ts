@@ -16,8 +16,7 @@ import { quoteSshShellArg } from "../ssh/command.js";
 import {
   bootstrapWorkspace,
   commitBootstrapState,
-  buildContractFilesCommitCommand,
-  materializeContractFilesInWorkspace,
+  materializeContractFilesCommit,
   provisionMiseToolchain,
   runWorkspaceSshCommand,
   seedWorkspaceLocalIgnore,
@@ -237,7 +236,13 @@ export async function prepareRunWorkspace(
   // derive's `materializeTemplate` step) ALREADY landed these files on the repo's
   // default branch as part of the project's initial content, so this materialization
   // is a no-op and NO commit is made (sha "").
-  const contractSha = await materializeContractFilesCommit(input, target, workspacePath);
+  const contractSha = await materializeContractFilesCommit({
+    ssh: input.ssh,
+    target,
+    workspacePath,
+    files: input.context.contractFiles,
+    provisionMise,
+  });
 
   // ANSWERER REVIEW BASE: anchor the writer's reviewed diff ABOVE the Tanren-owned
   // commits — the contract-files commit when one was made (apex v28 fix), ELSE the
@@ -269,41 +274,6 @@ export async function prepareRunWorkspace(
     // flagged `<unknown>` external). Absent on the unauthenticated clone (never pushes).
     ...(resolved.identity !== undefined && { pushIdentity: resolved.identity }),
   };
-}
-
-// Materialize the deterministic contract files into the workspace + commit them as a
-// dedicated commit above the bootstrap base, so they become part of the writer's PR
-// diff. Returns the new contract-commit sha (the answerer review base anchors ABOVE it,
-// so the Tanren-owned files are kept out of the writer's reviewed diff — apex v28 fix),
-// or "" when no commit was made: the run carries no contract manifest (the project
-// captured no lifecycle), a fake SSH yields no sha, OR the files were already present
-// (a brownfield re-clone — write-iff-absent left nothing newly written). On a "" the
-// caller keeps the bootstrap base, so the answerers diff from the same place as before.
-async function materializeContractFilesCommit(
-  input: RunPlannerLoopInput,
-  target: RunnerHandle,
-  workspacePath: string,
-): Promise<string> {
-  const files = input.context.contractFiles;
-  if (files === undefined || files.length === 0) return "";
-  const result = await materializeContractFilesInWorkspace({
-    ssh: input.ssh,
-    target,
-    files,
-    workspacePath,
-  });
-  // Nothing newly written (every file already present) ⇒ no commit, no base shift.
-  if (result.written.length === 0) return "";
-  const committed = await runWorkspaceSshCommand(input.ssh, target, {
-    label: "commit deterministic contract files",
-    cwd: workspacePath,
-    watchdog: buildActivityWatchdog({ substrate: input.ssh, target, cls: "vcs", workspace: workspacePath }),
-    // Built in workspace/contractMaterialize.ts, next to the materialization it commits.
-    // It runs with the project's toolchain active because this commit — unlike Tanren's
-    // bootstrap commit — keeps the repo's hooks LIVE and ships its content in the PR.
-    command: buildContractFilesCommitCommand(result.written, workspacePath),
-  });
-  return committed.stdout.trim();
 }
 
 // Clones the target branch and returns the clone HEAD. `git rev-parse HEAD` runs

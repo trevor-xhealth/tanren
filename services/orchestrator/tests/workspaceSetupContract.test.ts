@@ -18,6 +18,8 @@ import type { RunnerHandle } from "../src/engine/contracts/allocator.js";
 import type { RunnerCommand, CommandResult, CommandSubstrate } from "../src/engine/contracts/commandSubstrate.js";
 import { CiConfigV1, DEFAULT_CI_CONFIG, resolveCiConfig, setupCommand } from "../src/engine/ci/index.js";
 import { resolveWorkspaceLifecycleCommands } from "../src/engine/workflow/gate/index.js";
+import { ensureWorkspaceDepsInstalled } from "../src/engine/workspace/bootstrap.js";
+import { ensureWorkspaceSetup } from "../src/engine/workspace/setup.js";
 
 const target: RunnerHandle = {
   backend: "ssh",
@@ -106,9 +108,27 @@ describe("the verb is DECLARED, never detected", () => {
 
     expect(lifecycle.setup).toBeUndefined();
     expect(lifecycle.bootstrap).toBe(BOOTSTRAP_RUN);
+
+    // THE PROBE ASSERTION HAS TO RUN AGAINST THE WHOLE PREPARATION PATH, not against the
+    // resolver. `resolveWorkspaceLifecycleCommands` reads `.tanren/ci.yml` and returns two
+    // strings; it has no code path that could ever emit a conventional-script probe, so
+    // asserting the absence of one there is structurally guaranteed and would keep passing
+    // if a LATER step — `ensureWorkspaceSetup`, `ensureWorkspaceDepsInstalled`, workspace
+    // prep — started going looking for files nobody pointed at. That later step is the one
+    // the design argument is about, so it is the one driven here.
+    const prepared = new ContractRunnerSsh(yaml);
+    await ensureWorkspaceSetup({ ssh: prepared, target, workspacePath: WORKSPACE });
+    await ensureWorkspaceDepsInstalled({ ssh: prepared, target, workspacePath: WORKSPACE }).catch(() => {
+      // A repo with no contract file makes the guard a no-op; any throw here is not the
+      // subject of this test.
+    });
+    const everyCommand = [...ssh.commands, ...prepared.commands].map((c) => c.command).join("\n");
     for (const probe of ["scripts/bootstrap.sh", "script/bootstrap", "bin/setup", "make setup"]) {
-      expect(ssh.commands.map((c) => c.command).join("\n")).not.toContain(probe);
+      expect(everyCommand).not.toContain(probe);
     }
+    // …and a repo that declared no setup verb makes NO round-trip for it at all: absence is
+    // semantic here, not a fallback to something Tanren picked.
+    expect(prepared.commands.map((c) => c.command).join("\n")).not.toContain("workspace-setup");
   });
 
   it("resolves BOTH preparation commands from ONE read of the contract", async () => {

@@ -12,7 +12,7 @@ import type { RunnerHandle } from "../contracts/allocator.js";
 import type { CommandSubstrate } from "../contracts/commandSubstrate.js";
 import { runWorkspaceSshCommand } from "../workspace/index.js";
 import { buildActivityWatchdog } from "../ssh/activityWatchdog.js";
-import { withProjectHookToolchain } from "../ssh/miseActivate.js";
+import { TANREN_GIT, withProjectHookToolchain } from "../ssh/miseActivate.js";
 import type { Commit, WriterResult } from "./types.js";
 
 export async function captureBaselineSha(
@@ -52,9 +52,9 @@ async function commitWorkspaceChangesAfterCodex(
     command: withProjectHookToolchain(
       [
         "set -eu",
-        "git add -A",
-        "if ! git diff --cached --quiet --exit-code; then",
-        "GIT_AUTHOR_DATE='2026-01-01T00:00:00Z' GIT_COMMITTER_DATE='2026-01-01T00:00:00Z' git commit -m 'codex writer'",
+        `${TANREN_GIT} add -A`,
+        `if ! ${TANREN_GIT} diff --cached --quiet --exit-code; then`,
+        `GIT_AUTHOR_DATE='2026-01-01T00:00:00Z' GIT_COMMITTER_DATE='2026-01-01T00:00:00Z' ${TANREN_GIT} commit -m 'codex writer'`,
         "fi",
       ].join("\n"),
       workspace,

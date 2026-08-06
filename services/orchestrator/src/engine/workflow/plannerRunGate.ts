@@ -18,8 +18,8 @@ import {
   isInvalidCiConfigError,
   isWorkspaceDepsInstallError,
   resolveGateConfig,
-  resolveWorkspaceLifecycleCommands,
-  type WorkspaceLifecycleCommands,
+  resolveLifecycleContract,
+  type LifecycleContract,
   runGateForWhen,
   workspaceDepsInstallGateOutcome,
 } from "./gate/index.js";
@@ -124,9 +124,7 @@ export function buildDefaultGate(
   // finding). A substrate READ failure is NOT classified here — it keeps its loud-
   // throw semantics (a transient hiccup must never be recast as a fixable config
   // finding). Memoized: the result is observed once and reused for the rest of the run.
-  let configResult:
-    | Promise<{ ok: CiConfigV1 } | { invalid: CiConfigValidationError | CiYamlParseError } | undefined>
-    | undefined;
+  let configResult: Promise<{ ok: CiConfigV1 } | { invalid: CiConfigValidationError | CiYamlParseError }> | undefined;
   // The lazily-resolved EXPLICIT bootstrap command, cached alongside the config.
   // An explicit input.bootstrapCommand wins; otherwise the writer-authored
   // .tanren/ci.yml `bootstrap.run` (conventionally `just bootstrap`) is picked up.
@@ -135,7 +133,7 @@ export function buildDefaultGate(
   // below.
   // Memoized for the run: BOTH preparation commands, from one read of `.tanren/ci.yml`
   // (the per-gate `bootstrap.run` and the once-per-workspace `setup.run`).
-  let lifecyclePromise: Promise<WorkspaceLifecycleCommands> | undefined;
+  let lifecyclePromise: Promise<LifecycleContract> | undefined;
   // The lazily-resolved ACTIVE flaky-quarantine, memoized for the run. Loaded
   // org-scoped off the run's `input.pool` (RLS denies by default — a read off the
   // wrong scope sees ZERO rows). The CI-intelligence ACTUATION (closes the
@@ -188,8 +186,11 @@ export function buildDefaultGate(
           throw error;
         });
     }
+    // The resolved value is never `undefined`: the classifier above yields `{ ok }` or
+    // `{ invalid }`, or rejects. The extra emptiness arm this used to carry was
+    // unreachable, and the narrowing note further down already said as much.
     const resolved = await configResult;
-    if (resolved !== undefined && "invalid" in resolved) {
+    if ("invalid" in resolved) {
       // Built-repo `.tanren/ci.yml` is broken: a LOUD, run-scoped gate FAILURE
       // carrying the validation issues (→ `gateFindings` P0: "the repo's
       // `.tanren/ci.yml` is invalid"), fail-closed (never a pass). The worker survives.
@@ -203,7 +204,10 @@ export function buildDefaultGate(
     // greenfield-vs-brownfield bootstrap DEFAULT is still NOT baked in here, so an
     // explicit command always wins verbatim. This read is not new work at this boundary:
     // the gate-config resolution above already read the same file.
-    lifecyclePromise ??= resolveWorkspaceLifecycleCommands({ ssh: input.ssh, target, workspacePath });
+    // Classified AT CREATION, exactly like `configResult` above. ./gate/gateLifecycleContract.ts
+    // carries the reasoning: one control-flow shape across both reads of the same file, and a
+    // memoized promise that never stays rejected.
+    lifecyclePromise ??= resolveLifecycleContract({ ssh: input.ssh, target, workspacePath });
     // Bootstrap before the gate runs, EVERY gate (no latch). The project's `just
     // bootstrap` is idempotent (it reconciles an already-prepared tree as a cheap
     // no-op), and re-running it each gate is what catches a writer-added dependency
@@ -235,7 +239,25 @@ export function buildDefaultGate(
     // LOUD-fallback (`just bootstrap` if a justfile is present, else a loud failure).
     // Tanren names NO stack and makes NO greenfield-vs-frozen choice: that concern
     // lives inside the project's `just bootstrap` recipe.
-    const lifecycle = await lifecyclePromise;
+    // CLASSIFIED, not left to escape. This is a SECOND `cat` of `.tanren/ci.yml` — a
+    // separate SSH round-trip from the gate-config read above, with an `await` between
+    // them, against a workspace the run is actively writing. "The first read parsed, so the
+    // second must too" holds only if both see the same BYTES, which two reads of a live
+    // file do not guarantee: a gate racing the `cat >` that materializes the file gets a
+    // truncated document and an error the first read never saw. Unhandled, that rejection
+    // escapes `buildDefaultGate` and TERMINATES the run — precisely what the branch above
+    // exists to prevent, since an invalid `.tanren/ci.yml` must fail CLOSED as a P0 finding.
+    // This PR widened it: the second read used to be skipped when an `input.bootstrapCommand`
+    // override was given, and is now unconditional because `setup.run` has no override.
+    // NOT a fallback to an empty lifecycle — the config branch already ACCEPTED the first
+    // read, so gating with no bootstrap and no setup would be a pass against a contract
+    // nobody validated. Substrate errors still propagate: an unreadable runner is not a
+    // repo defect.
+    const lifecycleResult = await lifecyclePromise;
+    if ("invalid" in lifecycleResult) {
+      return invalidCiConfigGateOutcome(lifecycleResult.invalid, when, appendEvent, taskId);
+    }
+    const lifecycle = lifecycleResult.ok;
     const resolvedInstallCommand = input.bootstrapCommand ?? lifecycle.bootstrap;
     try {
       await ensureWorkspaceDepsInstalled({
@@ -259,10 +281,8 @@ export function buildDefaultGate(
       }
       throw error;
     }
-    // `resolved` is the `{ ok }` branch here (the `{ invalid }` branch returned above;
-    // an `undefined` is impossible since resolveGateConfig always yields a config or
-    // throws). Narrow to the parsed config for the tier run.
-    const config = (resolved as { ok: CiConfigV1 }).ok;
+    // `resolved` is the `{ ok }` branch here — the `{ invalid }` branch returned above.
+    const config = resolved.ok;
     // Anchor the native verdict on the commit the gate is about to verify. COMMIT-BINDING
     // (§5): the `pre_merge` gate passes a `headShaOverride` — the PUSHED PR head (the
     // cleaned ref, bootstrap commit dropped) — because the workspace HEAD is left at the

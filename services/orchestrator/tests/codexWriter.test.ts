@@ -53,7 +53,7 @@ describe("Codex writer adapter", () => {
       `CODEX_HOME='/home/tanren/.tanren/runs/run_codex_1/codex-home' codex exec --sandbox workspace-write --json -m 'gpt-5.6-luna' -c 'model_reasoning_effort="high"' --ignore-user-config --cd '/workspace/repo' -`,
     );
     expect(ssh.commands[2]?.command.stdin).toBe("make a tiny edit");
-    expect(ssh.commands[4]?.command.command).toContain("git commit -m 'codex writer'");
+    expect(ssh.commands[4]?.command.command).toContain("commit -m 'codex writer'");
     expect(result).toMatchObject({
       diff: "diff --git a/LIVE.md b/LIVE.md\n+done\n",
       commits: [],

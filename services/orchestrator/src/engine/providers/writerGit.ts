@@ -2,7 +2,7 @@ import type { RunnerHandle } from "../contracts/allocator.js";
 import type { CommandSubstrate } from "../contracts/commandSubstrate.js";
 import { runWorkspaceSshCommand } from "../workspace/index.js";
 import { buildActivityWatchdog } from "../ssh/activityWatchdog.js";
-import { withProjectHookToolchain } from "../ssh/miseActivate.js";
+import { TANREN_GIT, withProjectHookToolchain } from "../ssh/miseActivate.js";
 import type { Commit, WriterResult } from "./types.js";
 
 // shared baseline/diff/commit capture for CLI writer adapters that,
@@ -71,9 +71,9 @@ async function commitWorkspaceChanges(
     command: withProjectHookToolchain(
       [
         "set -eu",
-        "git add -A",
-        "if ! git diff --cached --quiet --exit-code; then",
-        `GIT_AUTHOR_DATE='2026-01-01T00:00:00Z' GIT_COMMITTER_DATE='2026-01-01T00:00:00Z' git commit -m ${shellSingleQuote(commitMessage)}`,
+        `${TANREN_GIT} add -A`,
+        `if ! ${TANREN_GIT} diff --cached --quiet --exit-code; then`,
+        `GIT_AUTHOR_DATE='2026-01-01T00:00:00Z' GIT_COMMITTER_DATE='2026-01-01T00:00:00Z' ${TANREN_GIT} commit -m ${shellSingleQuote(commitMessage)}`,
         "fi",
       ].join("\n"),
       workspace,

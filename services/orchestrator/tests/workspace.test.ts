@@ -251,12 +251,13 @@ describe("ensureWorkspaceDepsInstalled (greenfield deps-ensure)", () => {
       // When the bootstrap runs, the exit code it returns (0 = success, else fail).
       private readonly installExit: number = 0,
     ) {}
-    // The guarded install is the SECOND round-trip: deps-ensure first probes the repo's
-    // toolchain DECLARATION files (the widening that lets a repo without a mise.toml be
-    // provisioned at all), then builds the guard from what it found. `guard` names that
-    // second command so these assertions stay about the guard, not the probe.
+    // THREE round-trips, in the order workspace/setup.ts documents: probe the repo's
+    // toolchain DECLARATION files, PROVISION what they declared, then run the guarded
+    // install. Provisioning is its own step so the marker it writes activates the toolchain
+    // for the repo's `setup.run` — which used to run BEFORE any of it. `guard` names the
+    // install, so these assertions stay about the guard rather than the steps ahead of it.
     get guard(): RunnerCommand | undefined {
-      return this.commands[1];
+      return this.commands.find((c) => c.command.includes("deps-ensure"));
     }
     get declarationProbe(): RunnerCommand | undefined {
       return this.commands[0];
@@ -266,6 +267,10 @@ describe("ensureWorkspaceDepsInstalled (greenfield deps-ensure)", () => {
       // The declaration probe: this virtual workspace ships no toolchain declaration,
       // so it emits nothing (exit 0) — the "repo declared nothing" case.
       if (command.command.includes("TANREN-TOOLCHAIN-DECLARATION")) {
+        return { exitCode: 0, stdout: "", stderr: "" };
+      }
+      // The provision for a repo that declared nothing: a stated no-op line.
+      if (!command.command.includes("deps-ensure")) {
         return { exitCode: 0, stdout: "", stderr: "" };
       }
       // The guard: bootstrap whenever the contract exists (prepared state is
@@ -363,6 +368,7 @@ describe("ensureWorkspaceDepsInstalled (greenfield deps-ensure)", () => {
     // (the guarded install) stalls.
     const timedOut = new ScriptedSsh([
       { exitCode: 0, stdout: "", stderr: "" },
+      { exitCode: 0, stdout: "", stderr: "" },
       { exitCode: null, stdout: "", stderr: "", stalled: true },
     ]);
     const timeoutError = await ensureWorkspaceDepsInstalled({
@@ -382,7 +388,9 @@ describe("ensureWorkspaceDepsInstalled (greenfield deps-ensure)", () => {
     const ssh = new ScriptedSsh([
       // Round-trip 1: the declaration probe. This repo declares nothing Tanren recognizes…
       { exitCode: 0, stdout: "", stderr: "" },
-      // …and round-trip 2 is its own bootstrap dying on a toolchain binary nobody declared.
+      // …2 is the provision, a stated no-op for a repo that declared nothing…
+      { exitCode: 0, stdout: "", stderr: "" },
+      // …and 3 is its own bootstrap dying on a toolchain binary nobody declared.
       { exitCode: 127, stdout: "", stderr: "sh: 1: pnpm: not found" },
     ]);
     const error = await ensureWorkspaceDepsInstalled({
@@ -405,13 +413,14 @@ describe("ensureWorkspaceDepsInstalled (greenfield deps-ensure)", () => {
     // `EnsureWorkspaceDepsResult.toolchain` is how "which version actually ran" leaves the
     // per-gate door. Nothing covered it: a regression that dropped the field, or parsed the
     // wrong stream, would have passed this suite while the gate reported an empty toolchain.
+    // THREE round-trips at this door, and the third is the point: provisioning is its own
+    // step here (it has to precede the repo's `setup.run`), so the resolutions come from the
+    // PROVISION's stdout, not the guarded bootstrap's. One commit down the same case scripts
+    // two, because there provisioning is embedded in the guard.
     const ssh = new ScriptedSsh([
       { exitCode: 0, stdout: "", stderr: "" },
-      {
-        exitCode: 0,
-        stdout: "tanren: deps-ensure installing\n===TANREN-TOOLCHAIN-IN-EFFECT:node|24|24.18.1|.nvmrc|pinned===\n",
-        stderr: "",
-      },
+      { exitCode: 0, stdout: "===TANREN-TOOLCHAIN-IN-EFFECT:node|24|24.18.1|.nvmrc|pinned===\n", stderr: "" },
+      { exitCode: 0, stdout: "tanren: deps-ensure installing", stderr: "" },
     ]);
     const result = await ensureWorkspaceDepsInstalled({ ssh, target, workspacePath, command: "just bootstrap" });
     expect(result.installed).toBe(true);

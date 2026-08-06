@@ -424,3 +424,74 @@ describe("buildDefaultGate — gate.verdict commit-binding (headShaOverride)", (
     expect(events.events.some((e) => e.eventType === "gate.verdict")).toBe(false);
   });
 });
+
+// A contract that PARSES, and the same document cut mid-value — what a reader gets when it
+// races the `cat >` that materializes the file.
+const VALID_CI_YAML = [
+  "version: 1",
+  "bootstrap:",
+  "  run: just bootstrap",
+  "tiers:",
+  "  fast:",
+  "    - name: lint",
+  "      run: just tier-1",
+  "  slow:",
+  "    - name: test",
+  "      run: just tier-2",
+  "      junitReport: reports/junit.xml",
+  "  merge:",
+  "    - name: merge-test",
+  "      run: just tier-3",
+  "      junitReport: reports/junit.xml",
+  "when:",
+  "  fast:",
+  "    - per_iteration",
+  "  slow:",
+  "    - pre_audit",
+  "  merge:",
+  "    - pre_merge",
+  "",
+].join("\n");
+const TRUNCATED_CI_YAML = ["version: 1", "bootstrap:", "  run: just bootstrap", "tiers: [", ""].join("\n");
+
+describe("buildDefaultGate — the SECOND `.tanren/ci.yml` read fails CLOSED, not fatally", () => {
+  // TWO READS, ONE FILE, A LIVE WORKSPACE. `resolveGateConfig` and
+  // `resolveWorkspaceLifecycleCommands` are separate SSH `cat`s of `.tanren/ci.yml` with an
+  // `await` between them. The first is wrapped in a classifier that turns an invalid config
+  // into a fail-closed P0 gate outcome; the second had no handler at all, so a
+  // `CiYamlParseError` there escaped `buildDefaultGate` and TERMINATED the run — the exact
+  // outcome the first read's classifier exists to prevent.
+  //
+  // "The first parsed, so the second must too" only holds if the two reads see the same
+  // BYTES. This substrate is the counter-example: valid on the first `cat`, truncated on the
+  // second — the shape a gate gets when it races the `cat >` that materializes the file.
+  class DriftingCiConfigSsh implements CommandSubstrate {
+    readonly commands: RunnerCommand[] = [];
+    reads = 0;
+    async run(_t: RunnerHandle, command: RunnerCommand): Promise<CommandResult> {
+      this.commands.push(command);
+      const ok = { exitCode: 0, stdout: "", stderr: "" };
+      if (command.command.includes(".tanren/ci.yml") && command.command.includes("cat ")) {
+        this.reads += 1;
+        return this.reads === 1 ? { ...ok, stdout: VALID_CI_YAML } : { ...ok, stdout: TRUNCATED_CI_YAML };
+      }
+      if (command.command === "git rev-parse HEAD") return { ...ok, stdout: `${"d".repeat(40)}\n` };
+      return ok;
+    }
+  }
+
+  it("returns a fail-closed gate outcome instead of throwing out of the gate", async () => {
+    const ssh = new DriftingCiConfigSsh();
+    const events = new FakeEventStore();
+    const gate = buildDefaultGate(gateInput(ssh, context()), target, workspacePath, events);
+
+    const outcome = await gate({ when: "pre_merge" });
+
+    // NOT a throw, and NOT a pass: the repo's contract could not be read as valid, so the
+    // gate reports that as a finding the loop can act on.
+    expect(outcome.passed).toBe(false);
+    expect(ssh.reads).toBe(2);
+    // …and it never reached the project's own commands with an unvalidated contract.
+    expect(ssh.commands.some((c) => c.command.includes("just tier-"))).toBe(false);
+  });
+});
