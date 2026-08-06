@@ -110,16 +110,19 @@ export class FakeJobQueue<TPayload = unknown> implements JobQueue<TPayload> {
     }
   }
 
+  // Finalize ONLY from `running` — see the PgJobQueue note below. `cancelled` is
+  // terminal in `state/job.ts` (`cancelled: []`), so a late finalizer must not
+  // resurrect a cancelled job into `done`/`failed`.
   async complete(id: string): Promise<void> {
     const job = this.jobs.find((candidate) => candidate.id === id);
-    if (job !== undefined) {
+    if (job !== undefined && job.status === "running") {
       job.status = "done";
     }
   }
 
   async fail(id: string, failure: { kind: string; message: string }): Promise<void> {
     const job = this.jobs.find((candidate) => candidate.id === id);
-    if (job !== undefined) {
+    if (job !== undefined && job.status === "running") {
       job.status = "failed";
       job.failureKind = failure.kind;
       job.failureMessage = failure.message;
@@ -236,17 +239,41 @@ export class PgJobQueue<TPayload = unknown> implements JobQueue<TPayload> {
     );
   }
 
+  // FINALIZE ONLY FROM `running` (`AND status = 'running'`, the same guard `heartbeat`
+  // above already carries).
+  //
+  // `state/job.ts` declares `cancelled: []` — `cancelled` is TERMINAL, and
+  // `cancelled -> done` / `cancelled -> failed` are illegal transitions. But these two
+  // statements are raw SQL that never consults `isAllowedJobTransition`, so an
+  // unguarded `WHERE id = $1` performs exactly those illegal transitions in the
+  // database. That is reachable on the ordinary cancel path: cancelling a spec reaps
+  // the run's live `job_queue` rows to `cancelled` (workflow/cancelSpec.ts) but does
+  // NOT stop the worker already executing the job, and `executeNextPlanJob`
+  // (worker/runExecutor.ts) then unconditionally finalizes the job it holds. Without
+  // the guard that late finalizer overwrites the reap.
+  //
+  // Two things break when it does. The `run.cancelled` audit event names the reaped
+  // rows in `jobsCancelled`, so the record claims a reap that no longer holds — a
+  // believable-but-false reading, not a visible error. And `failed` is NOT terminal
+  // (`failed: ["queued", "dead_letter"]`), so a clobber to `failed` re-opens the very
+  // requeue door the reap was added to close.
+  //
+  // The guard makes the write a no-op instead: a lost finalization leaves the job
+  // `cancelled`, which is the true state. (A finalizer that lost its lease to the
+  // reaper and is racing a re-claim is a separate, pre-existing concern — see the
+  // note on PR #1406 — and is not what this guard addresses.)
   async complete(id: string): Promise<void> {
-    await this.pool.query("UPDATE job_queue SET status = 'done', ended_at = now(), leased_until = NULL WHERE id = $1", [
-      id,
-    ]);
+    await this.pool.query(
+      "UPDATE job_queue SET status = 'done', ended_at = now(), leased_until = NULL WHERE id = $1 AND status = 'running'",
+      [id],
+    );
   }
 
   async fail(id: string, failure: { kind: string; message: string }): Promise<void> {
     await this.pool.query(
       `UPDATE job_queue
        SET status = 'failed', ended_at = now(), leased_until = NULL, failure_kind = $2, failure_message = $3
-       WHERE id = $1`,
+       WHERE id = $1 AND status = 'running'`,
       [id, failure.kind, failure.message],
     );
   }

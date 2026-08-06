@@ -86,6 +86,10 @@ describe("job queue", () => {
 
     expect(pool.sql[0]).toContain("SET status = 'done'");
     expect(pool.sql[1]).toContain("SET status = 'failed'");
+    // Both finalizers are guarded to `running` so a late finalizer cannot perform the
+    // illegal `cancelled -> done` / `cancelled -> failed` transition (state/job.ts).
+    expect(pool.sql[0]).toContain("AND status = 'running'");
+    expect(pool.sql[1]).toContain("AND status = 'running'");
     expect(pool.params[1]).toEqual(["4", "writer_failed", "cannot write"]);
     expect(pool.sql[2]).toContain("WHERE run_id = $1 AND status = 'queued'");
     expect(pool.params[2]).toEqual(["run_1", "run_failed", "failed run"]);
@@ -198,7 +202,131 @@ describe("job queue lease recovery", () => {
     expect(reapSql).not.toContain("max_attempts");
     expect(reapSql).toContain("leased_until < now()");
   });
+
+  // A cancelled spec reaps its run's live `job_queue` rows to the TERMINAL `cancelled`
+  // status (workflow/cancelSpec.ts) but does NOT stop the worker already executing the
+  // job. That worker's `executeNextPlanJob` finalizer then runs anyway. If `complete` /
+  // `fail` write by id alone they perform `cancelled -> done` / `cancelled -> failed`,
+  // which `state/job.ts` declares ILLEGAL (`cancelled: []`) — silently undoing the reap,
+  // falsifying the `jobsCancelled` audit evidence, and (for `failed`, which allows
+  // `failed -> queued`) re-opening the requeue door the reap exists to close.
+  it("does not let a late finalizer overwrite a job the cancel already reaped", async () => {
+    for (const finalize of [
+      async (queue: PgJobQueue<{ ok: boolean }>, id: string) => {
+        await queue.complete(id);
+      },
+      async (queue: PgJobQueue<{ ok: boolean }>, id: string) => {
+        await queue.fail(id, { kind: "writer_failed", message: "cannot write" });
+      },
+    ]) {
+      const pool = new StatefulJobPool();
+      const queue = new PgJobQueue<{ ok: boolean }>(pool.asPgPool());
+      const enqueued = await queue.enqueue({ runId: "run_1", taskKind: "plan", payload: { ok: true } });
+      await queue.claim("plan", { runId: "run_1" });
+      expect(pool.statusOf(enqueued.id)).toBe("running");
+
+      // The operator cancels the spec: cancelSpec reaps this row terminal, out of band
+      // from the worker still holding it.
+      pool.forceStatus(enqueued.id, "cancelled");
+
+      // The worker finishes and finalizes the job it thinks it still owns.
+      await finalize(queue, enqueued.id);
+
+      expect(pool.statusOf(enqueued.id)).toBe("cancelled");
+    }
+  });
+
+  it("still finalizes a running job (the guard narrows the write, it does not disable it)", async () => {
+    const pool = new StatefulJobPool();
+    const queue = new PgJobQueue<{ ok: boolean }>(pool.asPgPool());
+    const done = await queue.enqueue({ runId: "run_1", taskKind: "plan", payload: { ok: true } });
+    await queue.claim("plan", { runId: "run_1" });
+    await queue.complete(done.id);
+    expect(pool.statusOf(done.id)).toBe("done");
+
+    const failed = await queue.enqueue({ runId: "run_1", taskKind: "plan", payload: { ok: true } });
+    await queue.claim("plan", { runId: "run_1" });
+    await queue.fail(failed.id, { kind: "writer_failed", message: "cannot write" });
+    expect(pool.statusOf(failed.id)).toBe("failed");
+  });
 });
+
+/**
+ * A stateful in-memory `pg.Pool` substitute for PgJobQueue's finalize statements.
+ *
+ * It does NOT hard-code the guard: it parses `AND status = '<x>'` out of the
+ * PRODUCTION statement and applies exactly that predicate. So the fake can never be
+ * more correct than the SQL under test — drop the guard from `complete`/`fail` and the
+ * write lands unconditionally, exactly as Postgres would apply it.
+ */
+class StatefulJobPool {
+  private readonly jobs = new Map<string, { runId: string | null; taskKind: string; status: string }>();
+  private seq = 0;
+
+  async query(sql: string, params: unknown[] = []): Promise<{ rows: unknown[]; rowCount: number }> {
+    const text = sql.trim();
+    if (text.includes("INSERT INTO job_queue")) {
+      this.seq += 1;
+      const id = String(this.seq);
+      this.jobs.set(id, {
+        runId: (params[0] as string | null) ?? null,
+        taskKind: params[2] as string,
+        status: "queued",
+      });
+      return {
+        rows: [{ id, run_id: params[0], task_id: params[1], task_kind: params[2], payload: {}, attempts: 0 }],
+        rowCount: 1,
+      };
+    }
+    if (text.includes("FOR UPDATE SKIP LOCKED")) {
+      const runId = (params[1] as string | null) ?? null;
+      for (const [id, job] of this.jobs) {
+        if (job.status !== "queued" || job.taskKind !== params[0]) continue;
+        if (runId !== null && job.runId !== runId) continue;
+        job.status = "running";
+        return {
+          rows: [{ id, run_id: job.runId, task_id: null, task_kind: job.taskKind, payload: {}, attempts: 1 }],
+          rowCount: 1,
+        };
+      }
+      return { rows: [], rowCount: 0 };
+    }
+    const target = /SET status = '([a-z_]+)'/u.exec(text);
+    if (text.startsWith("UPDATE job_queue") && target !== null) {
+      const job = this.jobs.get(String(params[0]));
+      // Apply the statement's OWN guard, whatever it is (absent guard => unconditional).
+      const guard = /AND status = '([a-z_]+)'/u.exec(text)?.[1];
+      if (job !== undefined && (guard === undefined || job.status === guard)) {
+        job.status = target[1] ?? job.status;
+        return { rows: [], rowCount: 1 };
+      }
+      return { rows: [], rowCount: 0 };
+    }
+    return { rows: [], rowCount: 0 };
+  }
+
+  async connect(): Promise<StatefulJobPool> {
+    return this;
+  }
+
+  release(): void {}
+
+  /** Reap the row out of band, the way `cancelSpec` does. */
+  forceStatus(id: string, status: string): void {
+    const job = this.jobs.get(id);
+    if (job !== undefined) {
+      job.status = status;
+    }
+  }
+
+  statusOf(id: string): string | undefined {
+    return this.jobs.get(id)?.status;
+  }
+
+  asPgPool() {
+    return this as never;
+  }
+}
 
 class RecordingPool {
   readonly sql: string[] = [];
