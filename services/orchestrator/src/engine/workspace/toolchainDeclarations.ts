@@ -133,7 +133,7 @@ export interface ToolchainDeclarationFile {
   readonly path: string;
   /** File contents for a content path; `""` for a presence path. */
   readonly contents: string;
-  /** True when the reader's byte bound cut this file short (./toolchainProvision.ts
+  /** True when the reader's byte bound cut this file short (./toolchainDeclarationRead.ts
    * `TRUNCATION_FRAME`). It is the difference between "this repository's manifest is
    * malformed" and "Tanren did not read all of it", and the two must not produce the same
    * report: the first is the repository's to fix, the second is Tanren's. */
